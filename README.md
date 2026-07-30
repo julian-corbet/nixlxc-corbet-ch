@@ -31,10 +31,10 @@ force" discipline nixvm applies to `virsh define`/`virsh start`.
 
 ## What nixlxc replaces, and what it deliberately does differently
 
-This design replaces a private, already-running implementation
-(`render-storage.nix` + `fleet.lxcStorage`/`fleet.lxcStorageBlock`, in this operator's own
-`infra` repo, not ported here) — a pure string-rendering function that emitted literal
-`lxc.mount.entry` lines with host paths **hardcoded as string literals**. Those same paths
+This design replaces a private, already-running implementation — a pure string-rendering
+function, driven by a per-host storage option of its own, kept in this operator's own private
+infrastructure configuration and not ported here — that emitted literal `lxc.mount.entry` lines
+with host paths **hardcoded as string literals**. Those same paths
 were already declared, once, as data in a private storage model elsewhere. That is a second
 copy of facts that already have an owner: exactly the duplication this whole design exists to
 remove, and it had a real, concrete cost — a typo'd category name was **structurally

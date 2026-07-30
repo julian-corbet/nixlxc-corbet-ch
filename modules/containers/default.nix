@@ -10,9 +10,10 @@
 # applies to `virsh define`.
 #
 # THIS IS THE MODULE THE WHOLE REPO EXISTS FOR. The legacy implementation this design replaces
-# (`infra/lib/render-storage.nix`, private, not ported here on purpose -- see the repo README's
-# "What nixlxc replaces") was a pure string-rendering function that emitted literal
-# `lxc.mount.entry` lines with host paths HARDCODED as string literals, re-typing facts already
+# (private, kept in this operator's own infrastructure configuration, not ported here on
+# purpose -- see the repo README's "What nixlxc replaces") was a pure string-rendering function
+# that emitted literal `lxc.mount.entry` lines with host paths HARDCODED as string literals,
+# re-typing facts already
 # declared once elsewhere. `deliver` below fixes that: it takes CATEGORY NAMES, resolved
 # against `nixstorage.delivery.categories`, and an unresolved name is a build error -- something
 # the legacy string-rendering function had no way to detect at all, typo or not.

@@ -68,8 +68,8 @@ let
   lxcConfigLib = import ../../lib/lxc-config.nix { inherit lib; };
 
   # ── nixstorage.delivery.categories: read defensively, never imported ───────────────────────
-  # Mirrors nixstorage's own `modules/disks.nix`/`modules/reconciler.nix` convention for
-  # `nixid.posix` (now `nixiam.posix`) exactly: `config.nixstorage.delivery.categories or { }`
+  # Mirrors nixstorage's own `modules/disks.nix`/`modules/reconciler.nix` convention for reading
+  # `nixiam.posix` exactly: `config.nixstorage.delivery.categories or { }`
   # so importing this module WITHOUT nixstorage evaluates fine as long as no container's
   # `deliver` list is non-empty. `nixstorageDeliveryDeclared` gates the ONE assertion that
   # would otherwise fire on every such host -- see `deliverAssertions` below for exactly what
@@ -345,7 +345,20 @@ let
   # environment is the ordinary un-adopted case, not an error.
   kindAssertions = lib.concatMap
     (name:
-      let declared = (hostEnvs.${name} or { }).kind or null; in
+      # ⚠ `or null` IS NOT ENOUGH HERE, and this cost a real bug. nixhost's `kind` option has NO
+      # default: it is mandatory, precisely so an unclassifiable environment cannot slip through.
+      # So when nixhost declares an environment but its `kind` is unset, reading it does not yield
+      # null -- it raises NixOS's "option accessed but has no value defined". The `or` idiom only
+      # catches a MISSING ATTRIBUTE; it does not catch a `throw` from an option that exists and has
+      # no value. Measured directly: `tryEval (... .kind or null)` returns success = false.
+      #
+      # Without tryEval, a host that declared an environment and simply had not yet said what kind
+      # it was would fail to evaluate with an error pointing at nixhost rather than at the omission.
+      let
+        declared =
+          let r = builtins.tryEval ((hostEnvs.${name} or { }).kind or null);
+          in if r.success then r.value else null;
+      in
       lib.optional (declared != null && declared != "lxc") {
         assertion = false;
         message = "nixlxc.containers.${name} builds an LXC container, but nixhost.environments.${name}.kind = \"${declared}\". The same name is declared as two different kinds of thing: nixhost is budgeting an envelope for a ${declared} while this module renders an LXC config against it. Rename one, or correct the kind.";

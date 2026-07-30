@@ -180,6 +180,13 @@ in
           (!(buildFails [ baseHost { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; } ]))
           "a container must still evaluate on a host that has never imported nixhost -- a cross-repo read that cannot be adopted incrementally will not be adopted")
 
+        (check "envelope/environment-with-unset-kind-still-builds"
+          (!(buildFails [ baseHost stubs.hostEnvStubKindMandatory
+            { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }
+            { nixhost.environments.example-container.resources.ram.limitMiB = 512; }
+          ]))
+          "nixhost's `kind` is mandatory with no default, so reading it when unset THROWS rather than yielding null -- `or null` does not catch that, only tryEval does. Without the guard, a host that declared an environment but had not yet said what kind it is fails to evaluate, with an error pointing at nixhost instead of at the omission")
+
         (check "envelope/kind-disagreement-fails"
           (buildFails [ baseHost stubs.hostEnvStub
             { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }

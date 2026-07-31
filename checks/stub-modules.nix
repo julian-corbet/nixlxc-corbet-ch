@@ -1,9 +1,10 @@
 # checks/stub-modules.nix
 #
-# Two tiny, self-contained stand-in modules -- NOT the real nixstorage/nixiam -- declaring just
-# enough option surface to exercise the "declared" branch of `modules/containers`'s two
-# defensive reads (`config.nixstorage.delivery.categories or { }` /
-# `config.nixiam.posix.identities or { }`) for real.
+# Tiny, self-contained stand-in modules -- NOT the real nixstorage/nixiam/nixhost -- declaring
+# just enough option surface to exercise the "declared" branch of `modules/containers`'s three
+# `lib.probeFact` reads (`nixstorage.delivery.categories`, `nixiam.posix.identities`,
+# `nixhost.environments`) for real, plus a RENAMED decoy per sibling (see the bottom of this
+# file) proving state (c) -- composed but moved -- actually warns through the real module.
 #
 # WHY A STAND-IN, NOT THE REAL SIBLING REPO. nixstorage's own `checks/default.nix` pulls in the
 # real nixiam flake as a `checks`-only input to compose its reconciler tests against a real
@@ -77,6 +78,41 @@
         };
       });
       default = { };
+    };
+  };
+
+  # ── THE DECOYS: each sibling's real option surface, renamed ────────────────────────────────
+  #
+  # `checks/default.nix`'s `factWiringResults` composes these ALONGSIDE `modules/containers`
+  # (never instead of it) to prove state (c) -- "the sibling namespace IS composed, but the exact
+  # leaf this repo reads moved" -- actually fires as a warning through the real
+  # `lib.probeFact`-wired module, not merely in `lib/facts.nix`'s own function-level tests. Each
+  # one composes the SAME top-level namespace (`nixstorage`/`nixiam`/`nixhost`) the real sibling
+  # would, so `config ? <namespace>` reads true -- state (a), "not composed at all", must NOT be
+  # what these fixtures exercise -- while the specific path this repo's own probes read
+  # (`delivery.categories`/`posix.identities`/`environments`) is missing, renamed to a plausible
+  # neighbour.
+  nixstorageDeliveryRenamedStub = { ... }: {
+    options.nixstorage.delivery.mounts = lib.mkOption {
+      type = lib.types.attrsOf lib.types.anything;
+      default = { };
+      description = "Stand-in for nixstorage having renamed delivery.categories to delivery.mounts.";
+    };
+  };
+
+  nixiamPosixRenamedStub = { ... }: {
+    options.nixiam.posix.accounts = lib.mkOption {
+      type = lib.types.attrsOf lib.types.anything;
+      default = { };
+      description = "Stand-in for nixiam having renamed posix.identities to posix.accounts.";
+    };
+  };
+
+  nixhostEnvironmentsRenamedStub = { ... }: {
+    options.nixhost.workloads = lib.mkOption {
+      type = lib.types.attrsOf lib.types.anything;
+      default = { };
+      description = "Stand-in for nixhost having renamed environments to workloads.";
     };
   };
 }

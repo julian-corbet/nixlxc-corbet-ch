@@ -18,6 +18,17 @@
 #      declared AT ALL -- gets its own check proving exactly that (see
 #      "deliver/silent-when-nixstorage-entirely-absent" below).
 #
+#   3. "fact-wiring/*" -- proves `lib.probeFact` (consumed from nixhost's own `lib/facts.nix` via
+#      this repo's `nixhost` flake input, see flake.nix) actually distinguishes, THROUGH the real
+#      `modules/containers` wiring, "sibling not composed" from "sibling composed but the exact
+#      leaf this repo reads was renamed" for all
+#      three siblings this repo reads (`nixstorage.delivery.categories`, `nixiam.posix.identities`,
+#      `nixhost.environments`). The renamed case is the one this whole check group exists for:
+#      before this repo adopted `lib.probeFact`, a rename landed in the exact same silent bucket
+#      as the sibling never having been imported at all -- see `stub-modules.nix`'s own decoy
+#      stubs, and `modules/containers/default.nix`'s own comments on each probe for the defect
+#      this closes.
+#
 # Nothing here builds a container, starts liblxc, or runs a single line of a rendered script.
 # That is exactly the boundary this repo exists to keep: nixlxc declares and renders, `nix
 # flake check` proves the declaring and rendering, and nothing more.
@@ -119,6 +130,48 @@ let
   ];
 
   configText = cfg: name: cfg.environment.etc."nixlxc/containers/${name}.config".text;
+
+  # ── fact-wiring fixtures: `lib.probeFact` proven THROUGH the real `modules/containers` ──────
+  #
+  # A container that references NOTHING from any of the three siblings (no `deliver`, no
+  # `idmap.base`) -- so the only thing that could possibly produce a warning or an assertion is
+  # the probe itself, never a value-consuming check reacting to an unresolved name.
+  quietContainer = {
+    nixlxc.containers.example-container = { rootfs.path = "/var/lib/nixlxc/roots/example"; };
+  };
+
+  # All three siblings composed with their REAL, faithful shape (the same stubs the tests above
+  # already use) -- must produce zero warnings.
+  cfg-facts-all-faithful = evalNixos [
+    baseHost
+    stubs.deliveryStub
+    stubs.posixStub
+    stubs.hostEnvStub
+    quietContainer
+  ];
+
+  # None of the three siblings composed at all -- state (a), must also produce zero warnings.
+  cfg-facts-none-composed = evalNixos [ baseHost quietContainer ];
+
+  # Each sibling composed under its RENAMED decoy shape -- state (c) -- one at a time, so each
+  # check attributes its one warning to the right probe.
+  cfg-facts-nixstorage-renamed = evalNixos [
+    baseHost
+    stubs.nixstorageDeliveryRenamedStub
+    quietContainer
+  ];
+
+  cfg-facts-nixiam-renamed = evalNixos [
+    baseHost
+    stubs.nixiamPosixRenamedStub
+    quietContainer
+  ];
+
+  cfg-facts-nixhost-renamed = evalNixos [
+    baseHost
+    stubs.nixhostEnvironmentsRenamedStub
+    quietContainer
+  ];
 in
 {
   eval-tests =
@@ -348,6 +401,54 @@ in
         (check "idmap/unset-never-fails-without-nixiam"
           (!(buildFails [ baseHost { nixlxc.containers.example-container = { rootfs.path = "/var/lib/nixlxc/roots/example"; }; } ]))
           "a container that never sets idmap.base must build fine on a host with no nixiam at all")
+
+        # --- fact-wiring: lib.probeFact through the real module, not just lib/facts.nix's own ---
+        (check "fact-wiring/all-siblings-faithful-has-no-warnings"
+          (cfg-facts-all-faithful.warnings == [ ])
+          "got warnings=${builtins.toJSON cfg-facts-all-faithful.warnings}, expected none: every sibling composed with its real, un-renamed shape must produce zero warnings")
+
+        (check "fact-wiring/no-siblings-composed-has-no-warnings"
+          (cfg-facts-none-composed.warnings == [ ])
+          "got warnings=${builtins.toJSON cfg-facts-none-composed.warnings}, expected none: state (a) -- nothing imported at all -- must stay silent")
+
+        (check "fact-wiring/nixstorage-delivery-renamed-warns-exactly-once"
+          (
+            let w = cfg-facts-nixstorage-renamed.warnings; in
+            lib.length w == 1
+            && lib.hasInfix "nixstorage.delivery.categories" (lib.head w)
+            && lib.hasInfix "nixstorage" (lib.head w)
+          )
+          "got warnings=${builtins.toJSON cfg-facts-nixstorage-renamed.warnings}, expected exactly one, naming nixstorage.delivery.categories -- the decoy renames it to nixstorage.delivery.mounts while nixstorage itself IS composed, and no container references deliver at all, so nothing but the probe itself can be the source")
+
+        (check "fact-wiring/nixstorage-delivery-renamed-does-not-fail-the-build"
+          (!(buildFails [ baseHost stubs.nixstorageDeliveryRenamedStub quietContainer ]))
+          "state (c) must warn, not fail the build -- lib.probeFact defaults to mode = \"warn\", never \"assert\", for these three reads")
+
+        (check "fact-wiring/nixiam-posix-renamed-warns-exactly-once"
+          (
+            let w = cfg-facts-nixiam-renamed.warnings; in
+            lib.length w == 1
+            && lib.hasInfix "nixiam.posix.identities" (lib.head w)
+            && lib.hasInfix "nixiam" (lib.head w)
+          )
+          "got warnings=${builtins.toJSON cfg-facts-nixiam-renamed.warnings}, expected exactly one, naming nixiam.posix.identities -- the decoy renames it to nixiam.posix.accounts while nixiam itself IS composed, and no container sets idmap.base at all")
+
+        (check "fact-wiring/nixiam-posix-renamed-does-not-fail-the-build"
+          (!(buildFails [ baseHost stubs.nixiamPosixRenamedStub quietContainer ]))
+          "state (c) must warn, not fail the build, same as the nixstorage case above")
+
+        (check "fact-wiring/nixhost-environments-renamed-warns-exactly-once"
+          (
+            let w = cfg-facts-nixhost-renamed.warnings; in
+            lib.length w == 1
+            && lib.hasInfix "nixhost.environments" (lib.head w)
+            && lib.hasInfix "nixhost" (lib.head w)
+          )
+          "got warnings=${builtins.toJSON cfg-facts-nixhost-renamed.warnings}, expected exactly one, naming nixhost.environments -- the decoy renames it to nixhost.workloads while nixhost itself IS composed, and example-container has no matching nixhost.environments entry to trip kindAssertions on top")
+
+        (check "fact-wiring/nixhost-environments-renamed-does-not-fail-the-build"
+          (!(buildFails [ baseHost stubs.nixhostEnvironmentsRenamedStub quietContainer ]))
+          "state (c) must warn, not fail the build, same as the two cases above")
       ];
 
       failed = builtins.filter (r: !r.ok) results;

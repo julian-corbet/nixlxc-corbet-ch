@@ -62,34 +62,52 @@
 # narrowly-scoped, this-container-only side effect as `nixvm`'s render of a domain XML file:
 # it is not shared infrastructure the way a bridge or a storage pool is (see nixvm's own
 # `vm-host` SCOPE block for that boundary) -- nothing else has any claim on it.
-{ lib, config, options, pkgs, ... }:
+{ probeFact, collectProbes }:
+{ lib, config, pkgs, ... }:
 
 let
   cfg = config.nixlxc.containers;
   lxcConfigLib = import ../../lib/lxc-config.nix { inherit lib; };
 
-  # ── nixstorage.delivery.categories: read defensively, never imported ───────────────────────
-  # Mirrors nixstorage's own `modules/disks.nix`/`modules/reconciler.nix` convention for reading
-  # `nixiam.posix` exactly: `config.nixstorage.delivery.categories or { }`
-  # so importing this module WITHOUT nixstorage evaluates fine as long as no container's
-  # `deliver` list is non-empty. `nixstorageDeliveryDeclared` gates the ONE assertion that
-  # would otherwise fire on every such host -- see `deliverAssertions` below for exactly what
-  # it does and does not catch, and the repo README's "What nixstorage absence really means"
-  # for the reasoning stated once, in full.
-  nixstorageDeliveryDeclared = options ? nixstorage && (options.nixstorage ? delivery) && (options.nixstorage.delivery ? categories);
-  deliveryCategories = config.nixstorage.delivery.categories or { };
+  # ── nixstorage.delivery.categories: read through lib.probeFact, never imported ─────────────
+  # Used to be `options ? nixstorage && (options.nixstorage ? delivery) && (options.nixstorage.
+  # delivery ? categories)` -- an OPTIONS-TREE check that cannot tell "nixstorage is not composed
+  # here" from "nixstorage IS composed but `delivery.categories` moved or was renamed underneath
+  # this exact read": both land on `nixstorageDeliveryDeclared = false`, silently disarming
+  # `deliverAssertions` below in the second case too, exactly the defect class `lib.probeFact`
+  # exists to close (see `lib/facts.nix`'s own header). `probe.state` now answers "is nixstorage
+  # composed" from `config`, not from a fragile per-leaf options-tree walk, and a genuine rename
+  # additionally produces a warning (`config.warnings` below) even on a host where no container
+  # currently references `deliver` at all -- the case a value-consuming assertion can never catch
+  # because nothing forces it to look.
+  nixstorageCategoriesProbe = probeFact {
+    inherit config;
+    namespace = "nixstorage";
+    path = [ "delivery" "categories" ];
+    fallback = { };
+  };
+  nixstorageDeliveryDeclared = nixstorageCategoriesProbe.state != "absent";
+  deliveryCategories = nixstorageCategoriesProbe.value;
   availableCategories = if deliveryCategories == { } then "(none declared)" else lib.concatStringsSep ", " (lib.attrNames deliveryCategories);
 
-  # ── nixiam.posix.identities: read defensively, never imported ──────────────────────────────
+  # ── nixiam.posix.identities: read through lib.probeFact, never imported ───────────────────
   # Same idiom, one repo over. Unlike `deliver` above, an `idmap.base` that fails to resolve is
   # ALWAYS a build error once a container actually sets it (see `idmapAssertions` below) --
   # there is no "silent when nixiam is absent" carve-out here, because the failure mode is not
   # "a mount is missing" (nixstorage's case, a safe empty default) but "a container silently
-  # stays MORE privileged than declared", which must never pass quietly. This mirrors
-  # `nixstorage.reconciler`'s own `posixDeclared` gate: it too always asserts once a name is
-  # actually referenced, present or not, and only varies the HINT in its message.
-  nixiamPosixDeclared = options ? nixiam && (options.nixiam ? posix) && (options.nixiam.posix ? identities);
-  posixIdentities = config.nixiam.posix.identities or { };
+  # stays MORE privileged than declared", which must never pass quietly. `nixiamPosixDeclared`
+  # now comes from `probe.state`, not an options-tree walk, for the identical reason the
+  # nixstorage probe above replaced one: the old check reported "nixiam not imported" even when
+  # nixiam WAS imported and only `posix.identities` had moved, which is a wrong message pointing
+  # at the wrong fix.
+  nixiamPosixProbe = probeFact {
+    inherit config;
+    namespace = "nixiam";
+    path = [ "posix" "identities" ];
+    fallback = { };
+  };
+  nixiamPosixDeclared = nixiamPosixProbe.state != "absent";
+  posixIdentities = nixiamPosixProbe.value;
   availableIdentities = if posixIdentities == { } then "(none declared)" else lib.concatStringsSep ", " (lib.attrNames posixIdentities);
 
   # Mirrors nixiam.posix's own private `resolvedGid` (modules/posix.nix): an unset `gid` is a
@@ -101,8 +119,8 @@ let
 
   notImportedHint = ''
 
-    nixiam's posix module does not appear to be imported into this configuration at all
-    (checked via options.nixiam.posix.identities). Either import it alongside nixlxc, or
+    nixiam does not appear to be composed into this configuration at all (checked via
+    lib.probeFact against the `nixiam` namespace). Either import it alongside nixlxc, or
     leave idmap.base unset to keep this container privileged, with no idmap at all.'';
 
   idmapType = lib.types.submodule {
@@ -305,15 +323,40 @@ let
   # contract states the rule: a substrate must not declare a second resource envelope.
   #
   # Matched BY NAME: `nixlxc.containers.<name>` reads
-  # `nixhost.environments.<name>.resources`. Read defensively and never as a flake input, so a
-  # host that has never imported nixhost still evaluates.
+  # `nixhost.environments.<name>.resources`. Read through `lib.probeFact` (the CONFIG namespace
+  # `nixhost` is probed defensively -- never `imports`ed -- exactly as before) rather than a bare
+  # `config.nixhost.environments or { }`: the bare form cannot tell "nixhost not imported here"
+  # from "nixhost IS imported but `environments` itself moved or was renamed", and the second one
+  # is the exact defect class this file's other two probes above close. A host that has never
+  # imported nixhost still evaluates either way; the difference is that a rename now warns
+  # (`config.warnings` below) instead of silently behaving as if nixhost were never imported at
+  # all. NOTE: this repo's flake now DOES take nixhost as a flake input (see flake.nix), but only
+  # to consume its `lib.probeFact`/`lib.collectProbes` mechanism itself, replacing this file's own
+  # former vendored copy of `lib/facts.nix` -- the defensive, no-`imports`-required read of
+  # `nixhost.environments` described here is completely unchanged by that.
   #
   # Absent nixhost, or an environment nixhost does not declare, renders NO cgroup ceiling. That
   # is deliberate and it is not a silent downgrade: an unbounded container is liblxc's own
   # default, and `null` already means exactly "no enforced limit" in nixhost's vocabulary. The
   # asymmetry with `idmap` below is intentional -- an unbounded container is an ordinary
   # configuration, whereas a silently-more-privileged one never is.
-  hostEnvs = config.nixhost.environments or { };
+  nixhostEnvironmentsProbe = probeFact {
+    inherit config;
+    namespace = "nixhost";
+    path = [ "environments" ];
+    fallback = { };
+  };
+  hostEnvs = nixhostEnvironmentsProbe.value;
+
+  # Every fact-probe's warnings, folded into the one list `config.warnings` below expects. Only
+  # a genuinely COMPOSED-but-unresolved sibling (state "unresolved") ever contributes here --
+  # states "absent" and "resolved" are both legitimate and silent, per `lib/facts.nix`'s own
+  # header.
+  factWarnings = (collectProbes [
+    nixstorageCategoriesProbe
+    nixiamPosixProbe
+    nixhostEnvironmentsProbe
+  ]).warnings;
   envelopeFor = name: (hostEnvs.${name} or { }).resources or null;
   effectiveMemoryMiB = name:
     let e = envelopeFor name; in if e == null then null else e.ram.limitMiB;
@@ -398,6 +441,12 @@ in
         '';
       }
     ] ++ requiredFieldAssertions ++ deliverAssertions ++ idmapAssertions ++ kindAssertions;
+
+    # THE SHARED READ CONTRACT'S OWN OUTPUT: state (c) on any of the three siblings this module
+    # reads (nixstorage.delivery.categories, nixiam.posix.identities, nixhost.environments) warns
+    # here even when nothing currently references the renamed fact -- see each probe's own
+    # comment above, and `checks/default.nix`'s `factWiringResults` for the proof that this fires.
+    warnings = factWarnings;
 
     environment.etc = lib.mapAttrs'
       (name: _: {

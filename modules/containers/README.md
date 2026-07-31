@@ -34,9 +34,9 @@ stopping, or restarting a container remains entirely an operator action (see
 ## `deliver` vs `idmap` — two defensive reads, two different failure modes
 
 Both `deliver` and `idmap.base` are **names**, resolved against a sibling repo's own table
-(`nixstorage.delivery.categories`, `nixiam.posix.identities`), read defensively
-(`config.<x> or { }`) exactly as `nixstorage`'s own `modules/reconciler.nix` reads
-`nixiam.posix.identities` — importing `nixlxc` without either sibling evaluates fine. What
+(`nixstorage.delivery.categories`, `nixiam.posix.identities`), read through `lib.probeFact`
+(`lib/facts.nix`, consumed from nixhost via this repo's `nixhost` flake input — see that file's own header) rather than a
+bare `config.<x> or { }` — importing `nixlxc` without either sibling still evaluates fine. What
 happens when a name does NOT resolve is deliberately **not** the same in both cases:
 
 - **`deliver`**: an unresolved name is a hard, named build error **only once
@@ -56,6 +56,29 @@ happens when a name does NOT resolve is deliberately **not** the same in both ca
 Both are proven in `checks/`, including the one case that must stay **silent**
 (`deliver/silent-when-nixstorage-entirely-absent`) and the one that must **never** be silent
 even in the symmetric-looking absent case (`idmap/unresolved-fails-when-nixiam-entirely-absent`).
+
+## The shared read contract: `lib.probeFact`, and the failure it closes
+
+A bare `config.nixfoo.bar or fallback` — what all three of this module's sibling reads used
+before this file existed (`nixstorage.delivery.categories`, `nixiam.posix.identities`, and
+`nixhost.environments`, the RAM/CPU ceiling table) — cannot tell **"nixfoo was never imported
+here"** from **"nixfoo IS imported, but `bar` moved or was renamed underneath this exact read"**.
+Both land on the identical fallback value, silently. The second one is a real defect, not a
+supported state: an older version of this file gated its "nixstorage declared?" check on
+`options ? nixstorage && options.nixstorage ? delivery && …`, an options-tree walk that reported
+"not imported" for a rename too — the wrong message, pointing a fix at the wrong place.
+
+`lib.probeFact` (vendored from [nixhost](https://github.com/julian-corbet/nixhost-corbet-ch)'s own
+`lib/facts.nix` — the canonical copy, and its own header carries the full defect-class writeup)
+fixes this by probing the sibling's top-level namespace separately from the leaf this module
+actually reads. A renamed leaf now surfaces as a `config.warnings` entry naming the option path,
+the namespace, and the fallback in use — even on a host where no container currently references
+`deliver`/`idmap.base` at all, which is exactly the case a value-consuming assertion can never
+catch, because nothing forces it to look. `checks/default.nix`'s `fact-wiring/*` group proves
+this fires, exactly once per sibling, through the real module — not only against
+`lib/facts.nix`'s own function-level behaviour — and that it warns rather than failing the build
+(`mode = "warn"`, the default; this module never opts into `mode = "assert"` for these three
+reads).
 
 ## Why the mount target is a category's own `home` leaf, at the container's root
 

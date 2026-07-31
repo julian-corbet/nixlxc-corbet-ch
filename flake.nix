@@ -12,7 +12,27 @@
   # defensive reads is exercised for real without this repo depending on either sibling
   # project's own release state -- see that file's own header for why a real flake input was
   # deliberately avoided here, even though nixstorage's own checks DO pull in nixiam that way.
-  outputs = { self, nixpkgs }:
+  #
+  # nixhost IS an input, for exactly one thing: `lib.probeFact`/`lib.collectProbes`
+  # (github:julian-corbet/nixhost-corbet-ch, `lib/facts.nix`) -- the shared, plain-function fix for
+  # the cross-namespace defensive-read defect class this module's own `nixstorageCategoriesProbe`/
+  # `nixiamPosixProbe`/`nixhostEnvironmentsProbe` all lean on (see nixhost's own `lib/facts.nix`
+  # header). This repo used to vendor a byte-identical copy of that file; it is now consumed
+  # instead, the same "one recipe, not a second copy" fix nixvault/nixnas already applied to the
+  # f2fs catalogue they both used to vendor. `probeFact`/`collectProbes` are closed over as plain
+  # function arguments (below), never `_module.args` -- the same partially-applied-before-the-
+  # module-system-sees-it pattern this family already uses for `nixfsCatalogue` (see infra's own
+  # flake.nix comment on `mkNixnas` for that precedent) -- so a consumer importing
+  # `nixosModules.containers` sees an ordinary module function and never needs to know
+  # `nixhost` exists. This is orthogonal to the paragraph above: nixstorage/nixiam/nixhost's own
+  # DATA is still read defensively, with zero flake dependency, exactly as before -- only the
+  # `probeFact`/`collectProbes` MECHANISM itself is now consumed rather than vendored.
+  inputs.nixhost = {
+    url = "github:julian-corbet/nixhost-corbet-ch";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { self, nixpkgs, nixhost }:
     let
       lib = nixpkgs.lib;
       systems = [ "x86_64-linux" "aarch64-linux" ];
@@ -27,7 +47,13 @@
       # materialized at its lxcpath location. See modules/containers/default.nix's own SCOPE
       # block -- and its "ALWAYS COMPOSED WITH modules/lxc-host" assertion, which is why
       # `default` below imports both together.
-      nixosModules.containers = ./modules/containers;
+      #
+      # `probeFact`/`collectProbes` closed over here, before the module system ever sees the
+      # result -- see the input comment above. The exported value is a plain module function
+      # taking the usual `{ lib, config, pkgs, ... }`; nothing about consuming it changes.
+      nixosModules.containers = import ./modules/containers {
+        inherit (nixhost.lib) probeFact collectProbes;
+      };
 
       nixosModules.default = { imports = [ self.nixosModules.lxc-host self.nixosModules.containers ]; };
 

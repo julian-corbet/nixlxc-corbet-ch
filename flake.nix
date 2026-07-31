@@ -17,16 +17,15 @@
   # (github:julian-corbet/nixhost-corbet-ch, `lib/facts.nix`) -- the shared, plain-function fix for
   # the cross-namespace defensive-read defect class this module's own `nixstorageCategoriesProbe`/
   # `nixiamPosixProbe`/`nixhostEnvironmentsProbe` all lean on (see nixhost's own `lib/facts.nix`
-  # header). This repo used to vendor a byte-identical copy of that file; it is now consumed
-  # instead, the same "one recipe, not a second copy" fix nixvault/nixnas already applied to the
-  # f2fs catalogue they both used to vendor. `probeFact`/`collectProbes` are closed over as plain
-  # function arguments (below), never `_module.args` -- the same partially-applied-before-the-
-  # module-system-sees-it pattern this family already uses for `nixfsCatalogue` (see infra's own
-  # flake.nix comment on `mkNixnas` for that precedent) -- so a consumer importing
-  # `nixosModules.containers` sees an ordinary module function and never needs to know
-  # `nixhost` exists. This is orthogonal to the paragraph above: nixstorage/nixiam/nixhost's own
-  # DATA is still read defensively, with zero flake dependency, exactly as before -- only the
-  # `probeFact`/`collectProbes` MECHANISM itself is now consumed rather than vendored.
+  # header). One recipe, not a second copy -- the same fix nixvault/nixnas apply to their own
+  # shared f2fs catalogue. `probeFact`/`collectProbes` are closed over as plain function arguments
+  # (below), never `_module.args` -- the same partially-applied-before-the-module-system-sees-it
+  # pattern this family already uses for `nixfsCatalogue` (see infra's own flake.nix comment on
+  # `mkNixnas` for that precedent) -- so a consumer importing `nixosModules.containers` sees an
+  # ordinary module function and never needs to know `nixhost` exists. This is orthogonal to the
+  # paragraph above: nixstorage/nixiam/nixhost's own DATA is still read defensively, with zero
+  # flake dependency -- only the `probeFact`/`collectProbes` MECHANISM itself is consumed rather
+  # than vendored.
   inputs.nixhost = {
     url = "github:julian-corbet/nixhost-corbet-ch";
     inputs.nixpkgs.follows = "nixpkgs";

@@ -26,8 +26,7 @@
 # category directly at `/<home>` under the container's own filesystem root (`/media`, `/work`,
 # ...) rather than inventing a container-side notion of "whose home directory" nixstorage
 # itself has no opinion on. `rel` strips the leading "/" because every liblxc
-# `lxc.mount.entry` target is container-RELATIVE, exactly the convention the private,
-# superseded implementation this design replaces used for the identical reason.
+# `lxc.mount.entry` target is container-RELATIVE.
 { lib }:
 
 let

@@ -267,11 +267,10 @@ in
           (lib.hasInfix "lxc.rootfs.path = dir:/var/lib/nixlxc/roots/example" (configText cfg-one-container "example-container"))
           "text: ${configText cfg-one-container "example-container"}")
 
-        # These two used to assert that a bare container rendered a memory ceiling and a DEFAULT
-        # cpu ceiling of 2 cores. Both are gone on purpose: this module no longer declares an
-        # envelope, so with no nixhost there is nothing to render. A default here would have been
-        # a resourcing decision made silently, and it would also have disarmed nixhost's
-        # oversubscription arithmetic by rendering a number nixhost never summed.
+        # A bare container renders NO memory or cpu ceiling: this module declares no envelope of
+        # its own, so with no nixhost there is nothing to render. A default here would be a
+        # resourcing decision made silently, and it would also disarm nixhost's oversubscription
+        # arithmetic by rendering a number nixhost never summed.
         (check "one-container/config-omits-memory-limit-without-nixhost"
           (!(lib.hasInfix "lxc.cgroup2.memory.max" (configText cfg-one-container "example-container")))
           "text: ${configText cfg-one-container "example-container"}")

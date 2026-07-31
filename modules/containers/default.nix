@@ -9,14 +9,9 @@
 # means" below, the same "declare, don't force" discipline nixvm's own `modules/guests`
 # applies to `virsh define`.
 #
-# THIS IS THE MODULE THE WHOLE REPO EXISTS FOR. The legacy implementation this design replaces
-# (private, kept in this operator's own infrastructure configuration, not ported here on
-# purpose -- see the repo README's "What nixlxc replaces") was a pure string-rendering function
-# that emitted literal `lxc.mount.entry` lines with host paths HARDCODED as string literals,
-# re-typing facts already
-# declared once elsewhere. `deliver` below fixes that: it takes CATEGORY NAMES, resolved
-# against `nixstorage.delivery.categories`, and an unresolved name is a build error -- something
-# the legacy string-rendering function had no way to detect at all, typo or not.
+# THIS IS THE MODULE THE WHOLE REPO EXISTS FOR: `deliver` below takes CATEGORY NAMES, resolved
+# against `nixstorage.delivery.categories`, rather than a host path hardcoded as a string
+# literal -- an unresolved name is a build error, never a silently-dropped mount.
 #
 # SCOPE -- what this module owns, so no knob has two managers:
 #   OWNED : the per-container rootfs/idmap/limits/autostart/deliver data model; resolving
@@ -70,20 +65,20 @@ let
   lxcConfigLib = import ../../lib/lxc-config.nix { inherit lib; };
 
   # ── nixstorage.delivery.categories: read through lib.probeFact, never imported ─────────────
-  # Used to be `options ? nixstorage && (options.nixstorage ? delivery) && (options.nixstorage.
-  # delivery ? categories)` -- an OPTIONS-TREE check that cannot tell "nixstorage is not composed
-  # here" from "nixstorage IS composed but `delivery.categories` moved or was renamed underneath
-  # this exact read": both land on `nixstorageDeliveryDeclared = false`, silently disarming
-  # `deliverAssertions` below in the second case too, exactly the defect class `lib.probeFact`
-  # exists to close (see `lib/facts.nix`'s own header). `probe.state` now answers "is nixstorage
-  # composed" from `config`, not from a fragile per-leaf options-tree walk, and a genuine rename
-  # additionally produces a warning (`config.warnings` below) even on a host where no container
-  # currently references `deliver` at all -- the case a value-consuming assertion can never catch
-  # because nothing forces it to look.
+  # An OPTIONS-TREE check (`options ? nixstorage && (options.nixstorage ? delivery) && ...`)
+  # cannot tell "nixstorage is not composed here" from "nixstorage IS composed but
+  # `delivery.categories` moved or was renamed underneath this exact read": both would land on
+  # `nixstorageDeliveryDeclared = false`, silently disarming `deliverAssertions` below in the
+  # second case too -- exactly the defect class `lib.probeFact` exists to close (see
+  # `lib/facts.nix`'s own header). `probe.state` answers "is nixstorage composed" from `config`,
+  # not from a fragile per-leaf options-tree walk, and a genuine rename additionally produces a
+  # warning (`config.warnings` below) even on a host where no container currently references
+  # `deliver` at all -- the case a value-consuming assertion can never catch because nothing
+  # forces it to look.
   nixstorageCategoriesProbe = probeFact {
     inherit config;
-    namespace = "nixstorage";
-    path = [ "delivery" "categories" ];
+    namespace = "nixstorage.delivery";
+    path = [ "categories" ];
     fallback = { };
   };
   nixstorageDeliveryDeclared = nixstorageCategoriesProbe.state != "absent";
@@ -96,14 +91,13 @@ let
   # there is no "silent when nixiam is absent" carve-out here, because the failure mode is not
   # "a mount is missing" (nixstorage's case, a safe empty default) but "a container silently
   # stays MORE privileged than declared", which must never pass quietly. `nixiamPosixDeclared`
-  # now comes from `probe.state`, not an options-tree walk, for the identical reason the
-  # nixstorage probe above replaced one: the old check reported "nixiam not imported" even when
-  # nixiam WAS imported and only `posix.identities` had moved, which is a wrong message pointing
-  # at the wrong fix.
+  # comes from `probe.state`, not an options-tree walk, for the same reason as the nixstorage
+  # probe above: an options-tree walk would report "nixiam not imported" even when nixiam WAS
+  # imported and only `posix.identities` had moved, a wrong message pointing at the wrong fix.
   nixiamPosixProbe = probeFact {
     inherit config;
-    namespace = "nixiam";
-    path = [ "posix" "identities" ];
+    namespace = "nixiam.posix";
+    path = [ "identities" ];
     fallback = { };
   };
   nixiamPosixDeclared = nixiamPosixProbe.state != "absent";
@@ -311,11 +305,11 @@ let
   effectiveRootfsPath = name: if cfg.${name}.rootfs.path != null then cfg.${name}.rootfs.path else "/unset-rootfs-path";
   # ── The resource envelope is NOT declared here. It is read from nixhost. ──────────────────
   #
-  # An earlier draft of this module declared `limits.memoryMiB` (required) and `limits.cpuCores`
-  # (default 2) of its own. That is a fact with two owners: `nixhost` already declares
-  # `environments.<name>.resources.ram.limitMiB` and `.cpu.quotaCores`, and it owns the only
-  # arithmetic nothing else can do -- summing every environment's claim at each level of the
-  # tree and refusing to evaluate when a node's children claim more than that node has.
+  # Declaring `limits.memoryMiB`/`limits.cpuCores` here would be a fact with two owners: `nixhost`
+  # already declares `environments.<name>.resources.ram.limitMiB` and `.cpu.quotaCores`, and it
+  # owns the only arithmetic nothing else can do -- summing every environment's claim at each
+  # level of the tree and refusing to evaluate when a node's children claim more than that node
+  # has.
   #
   # A second ceiling here does not merely duplicate; it DISARMS that check. nixhost would go on
   # summing numbers nobody rendered while this module rendered different ones, which is worse
@@ -330,10 +324,9 @@ let
   # is the exact defect class this file's other two probes above close. A host that has never
   # imported nixhost still evaluates either way; the difference is that a rename now warns
   # (`config.warnings` below) instead of silently behaving as if nixhost were never imported at
-  # all. NOTE: this repo's flake now DOES take nixhost as a flake input (see flake.nix), but only
-  # to consume its `lib.probeFact`/`lib.collectProbes` mechanism itself, replacing this file's own
-  # former vendored copy of `lib/facts.nix` -- the defensive, no-`imports`-required read of
-  # `nixhost.environments` described here is completely unchanged by that.
+  # all. NOTE: this repo's flake takes nixhost as a flake input (see flake.nix) only to consume
+  # its `lib.probeFact`/`lib.collectProbes` mechanism -- the defensive, no-`imports`-required read
+  # of `nixhost.environments` described here does not itself depend on that input.
   #
   # Absent nixhost, or an environment nixhost does not declare, renders NO cgroup ceiling. That
   # is deliberate and it is not a silent downgrade: an unbounded container is liblxc's own

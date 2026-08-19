@@ -75,14 +75,51 @@ in
         modules setting `virtualisation.lxc`, both believing they own the unit) or abandon typed
         container rendering entirely. Neither is a good answer to "I want this container declared".
 
-        Set true and this module installs NOTHING: no liblxc, no `lxcpath`, no service. It
-        contributes only the option surface, so `modules/containers` can render and materialise a
-        container against a runtime it does not manage. `containersPath` is still required, because
-        the renderer has to know where the other owner keeps its containers.
+        Set true and this module installs NOTHING: no liblxc, no `lxcpath`, no service.
+
+        ⚠ IT ALSO STOPS MATERIALISING. `modules/containers` RENDERS the container to
+        `/etc/nixlxc/containers/<name>.config` and stops there; installing that at the lxcpath is
+        the runtime owner's job. This is not a limitation to route around -- materialising needs
+        an ordering edge (after the storage holding `containersPath`, before whatever starts the
+        container) and under an external runtime this module knows NEITHER. It guessed once, on a
+        real host, and was wrong three ways at once: it ordered before a unit that did not exist,
+        ran 225s before the pool holding its target mounted, and rewrote the live config after the
+        container had already started from it.
+
+        So a consumer setting this MUST install the rendered file itself. The reference consumer
+        does it as an ExecStartPre in the very unit that starts the container, which is the one
+        ordering that cannot race. A warning says so at eval, because a container that silently
+        never picks up config changes is exactly the failure this repo exists to prevent.
+
+        `containersPath` is still required, because the renderer has to know where the other owner
+        keeps its containers.
 
         This is a statement about who owns the runtime, never about whether one exists -- nothing
         here can verify that liblxc is actually installed, and a wrong answer surfaces as a
         container that will not start rather than as a silent misconfiguration.
+      '';
+    };
+
+    materialisedBy = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "lxc-arch.service ExecStartPre";
+      description = ''
+        WHAT installs the rendered config at the lxcpath, when this module does not.
+
+        Only meaningful with `runtimeManagedElsewhere`. In that mode nothing here copies
+        `/etc/nixlxc/containers/<name>.config` into place, and a consumer who assumes otherwise
+        gets a container that starts from a stale file and never picks up a change -- silently.
+        So the module warns.
+
+        Naming the mechanism here silences that warning, and the point is that it is a
+        DECLARATION rather than a mute button: this module cannot verify that anything
+        materialises the file, so the honest choice is between an unanswered question and a
+        recorded answer. Answering it also leaves the next reader a pointer to the thing that
+        actually does the work, which a suppressed warning never would.
+
+        Whatever you name here should be able to order itself correctly: after the storage
+        holding `containersPath`, and before whatever starts the container.
       '';
     };
 

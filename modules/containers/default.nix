@@ -689,7 +689,25 @@ in
     # reads (nixstorage.delivery.categories, nixiam.posix.identities, nixhost.environments) warns
     # here even when nothing currently references the renamed fact -- see each probe's own
     # comment above, and `checks/default.nix`'s `factWiringResults` for the proof that this fires.
-    warnings = factWarnings;
+    # THE ONE THING A RENDER-ONLY CONSUMER CAN GET SILENTLY WRONG. With the runtime owned
+    # elsewhere this module renders and stops, so nothing here installs the config at the
+    # lxcpath. A consumer who sets the flag and assumes otherwise gets a container that starts
+    # from whatever file happens to be there and never picks up a change -- no error, no drift
+    # report, just a declaration that quietly stops meaning anything. Say it once, at eval,
+    # naming both files, rather than leaving it to an option description nobody re-reads.
+    warnings = factWarnings
+      ++ lib.optional (config.nixlxc.host.runtimeManagedElsewhere && cfg != { } && config.nixlxc.host.materialisedBy == null) ''
+        nixlxc: the LXC runtime here is declared as somebody else's
+        (nixlxc.host.runtimeManagedElsewhere), so this module RENDERS the container config and
+        does NOT install it. Nothing will copy /etc/nixlxc/containers/<name>.config to
+        ${effectiveContainersPath}/<name>/config for you -- the runtime's owner must, and only
+        the owner can order that correctly (after the storage holding the lxcpath, before
+        whatever starts the container). Containers rendered here: ${lib.concatStringsSep ", " (lib.attrNames cfg)}.
+
+        If something already does this, name it in `nixlxc.host.materialisedBy` -- that answers
+        the question rather than muting it, and leaves the next reader a pointer to the thing
+        doing the work.
+      '';
 
     environment.etc = lib.mapAttrs'
       (name: _: {

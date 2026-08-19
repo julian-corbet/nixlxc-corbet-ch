@@ -217,6 +217,29 @@ in
         # Its guess produced a dangling wants-link on a unit that did not exist, an install ordered
         # only after local-fs.target (1.6s) onto a pool that mounted at 227s, and a rewrite of the
         # live file AFTER the container had started from it. Render, and stop.
+        # A warning nobody has watched fire is a comment. Render-only is the one thing a consumer
+        # can get silently wrong -- a container that starts from whatever file is there and never
+        # picks up a change -- so the warning that says so is pinned in BOTH directions.
+        (check "external-runtime/warns-that-the-owner-must-materialise"
+          (
+            let w = cfg-external-runtime.warnings; in
+            lib.length w == 1
+            && lib.hasInfix "does NOT install it" (lib.head w)
+            && lib.hasInfix "example-container" (lib.head w)
+          )
+          "warnings: ${builtins.toJSON cfg-external-runtime.warnings} -- expected exactly one, naming the container and saying this module does not install the config")
+
+        (check "external-runtime/naming-what-materialises-answers-the-warning"
+          ((evalNixos [
+            { nixlxc.host = { runtimeManagedElsewhere = true; containersPath = "/var/lib/nixlxc/containers"; materialisedBy = "example-start.service ExecStartPre"; }; }
+            { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }
+          ]).warnings == [ ])
+          "naming the mechanism must answer the question, not merely mute it -- and must not leave the warning firing forever at a consumer doing it right")
+
+        (check "external-runtime/the-ordinary-path-is-NOT-warned-at"
+          (cfg-one-container.warnings == [ ])
+          "warnings: ${builtins.toJSON cfg-one-container.warnings} -- when this module owns the runtime it materialises, so warning would be noise")
+
         (check "external-runtime/does-NOT-materialise-because-it-cannot-order-that-correctly"
           (!(cfg-external-runtime.systemd.services ? "nixlxc-container-example-container-apply"))
           "under an external runtime the owner materialises; this module cannot know what to order against")

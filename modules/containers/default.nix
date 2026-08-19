@@ -231,13 +231,240 @@ let
         '';
       };
 
+      arch = lib.mkOption {
+        type = lib.types.str;
+        default = "linux64";
+        example = "linux32";
+        description = ''
+          The personality liblxc sets for the container (`lxc.arch`). `linux64` is right for every
+          64-bit rootfs on a 64-bit host, which is why it is the default rather than a value a
+          caller has to look up. It exists as an option because a 32-bit rootfs on a 64-bit host is
+          a real and unremarkable thing, and until this was declarable that container simply could
+          not be described here.
+        '';
+      };
+
+      network = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            type = lib.mkOption {
+              type = lib.types.str;
+              default = "veth";
+              description = "liblxc's `lxc.net.<n>.type`. `veth` is the pair-and-bridge shape almost every container wants.";
+            };
+            link = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "br0";
+              description = ''
+                The HOST bridge this interface attaches to. NO DEFAULT and never guessed: which
+                bridge exists, and what is on the other side of it, is a fact about the host's
+                network that this module has no way to know and no business inventing.
+              '';
+            };
+            up = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = ''
+                Whether liblxc brings the interface up at start (`flags = up`). True by default
+                because an interface declared and left down is almost always a mistake rather than
+                a choice, and the failure it produces -- a container that starts fine and simply
+                has no network -- is a quiet one.
+              '';
+            };
+            name = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "eth0";
+              description = "The interface's name INSIDE the container. Left unset, liblxc picks one.";
+            };
+            hwaddr = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "00:16:3e:00:00:01";
+              description = ''
+                A fixed MAC. Worth setting whenever anything off-box identifies this container by
+                it -- a DHCP reservation, a router's host table, a switch port policy. Unset, liblxc
+                generates a fresh one at every start, and every one of those identifications breaks
+                silently the next time the container is restarted.
+              '';
+            };
+          };
+        });
+        default = [ ];
+        description = ''
+          The container's network interfaces, in order. The INDEX in liblxc's key
+          (`lxc.net.0.*`, `lxc.net.1.*`) is taken from list position, so it is never written by
+          hand -- it is the one part of that key nothing can check, and a duplicated or skipped
+          index is a config liblxc reads differently from how it looks.
+
+          Empty (the default) renders no network keys at all, which is liblxc's own "inherit the
+          host's namespace" behaviour and a deliberate, valid state rather than a missing value.
+        '';
+      };
+
+      capabilities.drop = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "sys_module" "sys_time" "sys_boot" ];
+        description = ''
+          Capabilities dropped from the container (`lxc.cap.drop`), written without the `CAP_`
+          prefix exactly as liblxc reads them.
+
+          THIS MATTERS MOST FOR A PRIVILEGED CONTAINER, where it is close to the only lever there
+          is: with no idmap, the container's root IS the host's root, so a capability left in place
+          is a capability over the HOST. `sys_module` loads host kernel modules, `sys_time` sets the
+          host clock, `sys_boot` reboots the host. Dropping what a container has no use for costs it
+          nothing and removes those outright.
+
+          Empty by default, because which capabilities a given workload actually needs is a fact
+          about that workload -- a list guessed here would either break containers or be security
+          theatre.
+        '';
+      };
+
+      autodev = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether liblxc mounts a fresh tmpfs `/dev` and populates it at every start
+          (`lxc.autodev = 1`).
+
+          THE CONSEQUENCE WORTH KNOWING BEFORE SETTING IT: because that `/dev` is rebuilt from
+          scratch each time, anything created there by hand -- a `mknod` for a device node the
+          container needs -- is gone at the next start, and the container comes up subtly broken
+          rather than failing. Device nodes belong in `mounts` below, bound in from the host, where
+          they survive the rebuild.
+        '';
+      };
+
+      hooks.preStart = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/var/lib/nixlxc/hooks/example-guard.sh";
+        description = ''
+          Absolute path to a HOST executable liblxc runs before the container starts
+          (`lxc.hook.pre-start`). A non-zero exit refuses the start, which is what makes this the
+          right place for a precondition the container cannot check from inside itself -- most
+          usefully that its rootfs's backing filesystem is actually mounted.
+
+          That precondition is not hypothetical: a container whose rootfs directory exists but whose
+          dataset is NOT mounted starts perfectly and writes into the empty mountpoint underneath,
+          so the data goes somewhere nobody looks and the real filesystem silently diverges. A
+          pre-start guard is the only place to catch it, because by the time anything inside is
+          running the wrong directory is already `/`.
+
+          nixlxc does not write, install or validate the script -- it is a host artifact with its
+          own lifecycle, and pointing at one that is missing is a start-time failure, not an
+          eval-time one.
+        '';
+      };
+
+      devices = {
+        denyAll = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Emit `lxc.cgroup2.devices.deny = a` -- deny every device, so that `devices.allow` below
+            is the container's COMPLETE list rather than an addition to whatever it could already
+            reach.
+
+            WITHOUT THIS, AN ALLOWLIST IS DECORATION. liblxc's default is to permit, so a config
+            carrying only `allow` lines reads like a restriction while restricting nothing. Turning
+            it on is what converts the list below from a description into a boundary.
+
+            The renderer always prints the deny BEFORE the allows, because the cgroup2 filter is
+            evaluated in order and an allowlist printed first never applies. That ordering is not a
+            caller's to get wrong.
+          '';
+        };
+
+        allow = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          example = [ "c 1:3 rwm" "c 136:* rwm" ];
+          description = ''
+            Device rules the container may use, each written in the kernel's own
+            `<type> <major>:<minor> <perms>` form and passed through verbatim.
+
+            NOT A PATH LANGUAGE, and the distinction bites: cgroup v2's device filter is a kernel
+            ABI keyed on MAJOR:MINOR, so there is no by-path form and no way to say "whatever device
+            is at this symlink". A `mounts` entry can follow a stable `/dev/disk/by-path` symlink to
+            whichever device currently sits there; the matching rule here cannot, and must be kept
+            correct by hand. When a host renumbers, the mount still binds the right hardware while
+            the rule may deny the very node just bound -- and the device disappears with nothing
+            logged.
+
+            A rule granting only `m` (for example `c *:* m`) grants MKNOD and nothing else: the
+            right to create a node, never to open one. That is what `autodev` needs to populate a
+            fresh `/dev`, and it weakens nothing, because a node created for a major the container
+            may not open is still unopenable.
+          '';
+        };
+      };
+
+      mounts = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            source = lib.mkOption {
+              type = lib.types.str;
+              example = "/dev/net/tun";
+              description = "The HOST path, or the filesystem name for a virtual mount (`tmpfs`).";
+            };
+            target = lib.mkOption {
+              type = lib.types.str;
+              example = "dev/net/tun";
+              description = ''
+                Where it lands inside the container. liblxc reads this as container-RELATIVE; a
+                leading "/" is stripped rather than refused, so either spelling works.
+              '';
+            };
+            fsType = lib.mkOption {
+              type = lib.types.str;
+              default = "none";
+              example = "tmpfs";
+              description = "`none` for a bind of something that already exists; a real filesystem name for a virtual mount.";
+            };
+            options = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ "bind" "create=file" ];
+              example = [ "rbind" "create=dir" "optional" ];
+              description = ''
+                Mount options, joined with commas in liblxc's own fourth field.
+
+                THE THREE THAT DECIDE BEHAVIOUR HERE:
+                `bind` vs `rbind` -- `rbind` carries filesystems mounted UNDERNEATH the source along
+                with it. For a source that hides further mounts (a dataset with mounted children, a
+                device class directory), a plain `bind` silently delivers an emptier tree than the
+                one that was asked for.
+                `create=file` vs `create=dir` -- liblxc will not create a mountpoint it was not told
+                the shape of, and getting it wrong fails the start rather than guessing.
+                `optional` -- the container still starts when the source is absent. Right for
+                hardware that may not be present; wrong for anything the workload needs, where a
+                loud failure to start beats a container that comes up missing a device.
+              '';
+            };
+          };
+        });
+        default = [ ];
+        description = ''
+          Mount entries stated outright, for everything `deliver` above does not cover: host device
+          nodes, class directories, a read-only tmpfs laid over a path that must not be reachable.
+
+          SEPARATE FROM `deliver` ON PURPOSE. A delivered mount is RESOLVED -- a category name is
+          looked up in `nixstorage.delivery.categories` and a wrong name is a build error. An entry
+          here is a raw host fact this module cannot check for you: nothing verifies the source
+          exists, and nothing can. Two different authorities, so two different options, rather than
+          one that is checked in some cases and not in others.
+        '';
+      };
+
       extraConfig = lib.mkOption {
         type = lib.types.lines;
         default = "";
         description = ''
-          Escape hatch: raw liblxc config lines appended verbatim, for anything this first cut
-          doesn't model as its own option (network/veth attachment, device passthrough, extra
-          cgroup rules, and so on all belong here until/unless they earn a dedicated option --
+          Escape hatch: raw liblxc config lines appended verbatim, for anything this module
+          doesn't model as its own option (see the options above for what it now does --
           mirrors nixvm's own `guests.<name>.extraDomainXML`).
         '';
       };
@@ -367,6 +594,16 @@ let
     limits = { memoryMiB = effectiveMemoryMiB name; cpuCores = effectiveCpuCores name; };
     autostart = cfg.${name}.autostart;
     extraConfig = cfg.${name}.extraConfig;
+
+    # The hardware half. Each of these renders nothing when left at its default, so a container
+    # that declares none of them is byte-for-byte what this module produced before they existed.
+    arch = cfg.${name}.arch;
+    network = cfg.${name}.network;
+    capsDrop = cfg.${name}.capabilities.drop;
+    autodev = cfg.${name}.autodev;
+    hooks = cfg.${name}.hooks;
+    devices = cfg.${name}.devices;
+    entries = cfg.${name}.mounts;
   };
 
   # ── Cross-check against nixhost: the two declarations must agree on WHAT this is ───────────

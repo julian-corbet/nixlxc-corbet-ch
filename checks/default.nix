@@ -287,8 +287,11 @@ in
             ]) "example-container"))
           "a cpu quota declared in nixhost must reach the rendered cgroup line -- 4 cores over a fixed 100ms period")
 
-        (check "one-container/config-omits-autostart-by-default"
-          (!(lib.hasInfix "lxc.start.auto" (configText cfg-one-container "example-container")))
+        # Counterpart to config-render/autostart-false-states-the-decision-rather-than-omitting-it:
+        # the default is still OFF, and now it says so in the rendered config instead of leaving a
+        # reader to infer it from an absent line.
+        (check "one-container/config-states-autostart-off-by-default"
+          (lib.hasInfix "lxc.start.auto = 0" (configText cfg-one-container "example-container"))
           "text: ${configText cfg-one-container "example-container"}")
 
         (check "one-container/config-omits-idmap-by-default"
@@ -488,6 +491,92 @@ in
           (lib.hasInfix "lxc.rootfs.path = dir:/example/rootfs" (render { }))
           "rendered: ${render { }}")
 
+        # ── The hardware half ─────────────────────────────────────────────────────────────
+        # Everything below renders NOTHING when left alone, so a container declaring none of it
+        # is byte-for-byte what this renderer produced before these existed. Each case pins the
+        # part of the liblxc key a caller cannot check by reading their own declaration.
+
+        # THE INDEX IS POSITIONAL AND NOT THE CALLER'S. A duplicated or skipped `lxc.net.<n>` is a
+        # config liblxc reads differently from how it looks, so the number comes from list order.
+        (check "config-render/network-interfaces-are-indexed-by-position"
+          (
+            let r = render { network = [
+              { type = "veth"; link = "br0"; up = true; name = "eth0"; hwaddr = "00:16:3e:00:00:01"; }
+              { type = "veth"; link = "br1"; up = false; name = "eth1"; hwaddr = null; }
+            ]; }; in
+            lib.hasInfix "lxc.net.0.link = br0" r
+            && lib.hasInfix "lxc.net.0.hwaddr = 00:16:3e:00:00:01" r
+            && lib.hasInfix "lxc.net.1.link = br1" r
+            # `up = false` prints no flags line at all, rather than a falsy one liblxc would not read
+            && !(lib.hasInfix "lxc.net.1.flags" r)
+          )
+          "rendered: ${render { network = [{ type = "veth"; link = "br0"; up = true; name = "eth0"; hwaddr = null; }]; }}")
+
+        (check "config-render/no-network-declared-renders-no-net-keys"
+          (!(lib.hasInfix "lxc.net." (render { })))
+          "rendered: ${render { }}")
+
+        # DENY BEFORE ALLOW, and it is the mechanism rather than tidiness: the cgroup2 filter is
+        # evaluated as written, so an allowlist printed before its deny never applies.
+        (check "config-render/device-deny-is-rendered-before-its-allows"
+          (
+            let
+              r = render { devices = { denyAll = true; allow = [ "c 1:3 rwm" "c 5:0 rwm" ]; }; };
+              # Split on the deny and require BOTH allows in the tail: that is ordering stated as a
+              # property of the text rather than as two line numbers compared.
+              parts = lib.splitString "lxc.cgroup2.devices.deny = a" r;
+              afterDeny = lib.elemAt parts 1;
+            in
+            lib.length parts == 2
+            && lib.hasInfix "devices.allow = c 1:3 rwm" afterDeny
+            && lib.hasInfix "devices.allow = c 5:0 rwm" afterDeny
+          )
+          "rendered: ${render { devices = { denyAll = true; allow = [ "c 1:3 rwm" ]; }; }}")
+
+        (check "config-render/allows-without-deny-render-no-deny-line"
+          (
+            let r = render { devices = { denyAll = false; allow = [ "c 1:3 rwm" ]; }; }; in
+            lib.hasInfix "devices.allow = c 1:3 rwm" r && !(lib.hasInfix "devices.deny" r)
+          )
+          "rendered: ${render { devices = { denyAll = false; allow = [ "c 1:3 rwm" ]; }; }}")
+
+        # liblxc's five-field entry, including the two trailing zeroes it requires.
+        (check "config-render/mount-entry-shape-and-relative-target"
+          (
+            let r = render { entries = [
+              { source = "/dev/net/tun"; target = "/dev/net/tun"; fsType = "none"; options = [ "bind" "create=file" ]; }
+              { source = "tmpfs"; target = "sys/power"; fsType = "tmpfs"; options = [ "ro" "size=4k" "create=dir" ]; }
+            ]; }; in
+            # leading "/" on the target is stripped, because liblxc reads it container-relative
+            lib.hasInfix "lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file 0 0" r
+            && lib.hasInfix "lxc.mount.entry = tmpfs sys/power tmpfs ro,size=4k,create=dir 0 0" r
+          )
+          "rendered: ${render { entries = [{ source = "/dev/net/tun"; target = "/dev/net/tun"; fsType = "none"; options = [ "bind" ]; }]; }}")
+
+        (check "config-render/caps-autodev-hook-and-arch"
+          (
+            let r = render {
+              capsDrop = [ "sys_module" "sys_boot" ];
+              autodev = true;
+              hooks.preStart = "/example/guard.sh";
+              arch = "linux32";
+            }; in
+            lib.hasInfix "lxc.cap.drop = sys_module sys_boot" r
+            && lib.hasInfix "lxc.autodev = 1" r
+            && lib.hasInfix "lxc.hook.pre-start = /example/guard.sh" r
+            && lib.hasInfix "lxc.arch = linux32" r
+          )
+          "rendered: ${render { capsDrop = [ "sys_module" ]; autodev = true; }}")
+
+        # An explicit 0 records a DECISION not to autostart; silence records only that nobody
+        # wrote a line. Both are printed so the two are never confused.
+        (check "config-render/autostart-is-stated-in-both-directions"
+          (
+            lib.hasInfix "lxc.start.auto = 0" (render { autostart = false; })
+            && lib.hasInfix "lxc.start.auto = 1" (render { autostart = true; })
+          )
+          "off: ${render { autostart = false; }}")
+
         (check "config-render/init-cmd"
           (lib.hasInfix "lxc.init.cmd = /sbin/init" (render { }))
           "rendered: ${render { }}")
@@ -523,8 +612,14 @@ in
           (lib.hasInfix "lxc.start.auto = 1" (render { autostart = true; }))
           "rendered: ${render { autostart = true; }}")
 
-        (check "config-render/no-autostart-line-when-false"
-          (!(lib.hasInfix "lxc.start.auto" (render { autostart = false; })))
+        # WAS "no autostart line when false", and the change is deliberate. Omitting the line
+        # rendered the same BEHAVIOUR -- 0 is liblxc's own default -- while recording a different
+        # FACT: silence says only that nobody wrote a line, where `lxc.start.auto = 0` says somebody
+        # decided this container does not come up with the host. For a container deliberately kept
+        # out of autostart those are not the same thing, and the silent version invites a future
+        # reader to "fix" it. Safe to change: no consumer composes this module yet.
+        (check "config-render/autostart-false-states-the-decision-rather-than-omitting-it"
+          (lib.hasInfix "lxc.start.auto = 0" (render { autostart = false; }))
           "rendered: ${render { autostart = false; }}")
 
         (check "config-render/mount-line-rendered-relative-and-rbind"

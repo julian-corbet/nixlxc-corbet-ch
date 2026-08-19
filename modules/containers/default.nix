@@ -6,9 +6,19 @@
 # (`deliver`) -- never a host path. This module owns rendering all of that into a real liblxc
 # `.config` document and -- WHEN THIS REPO OWNS THE RUNTIME -- keeping that file materialized at
 # its canonical `lxcpath` location on
-# every activation. It never runs `lxc-start`/`lxc-stop` itself -- see "What 'kept applied'
-# means" below, the same "declare, don't force" discipline nixvm's own `modules/guests`
-# applies to `virsh define`.
+# every activation. It never runs `lxc-start`/`lxc-stop` itself -- see "What 'kept materialized'
+# means, precisely" in this module's README, the same "declare, don't force" discipline nixvm's
+# own `modules/guests` applies to `virsh define`.
+#
+# ALWAYS COMPOSED WITH modules/lxc-host.
+# This module is not standalone and does not try to be. It reads `nixlxc.host.containersPath`
+# directly to know where a rendered config belongs, and it asserts that exactly one runtime owner
+# is declared -- `nixlxc.host.enable` (this repo installs liblxc and the lxcpath) or
+# `nixlxc.host.runtimeManagedElsewhere` (something else already does). Neither set is a hard
+# refusal, because a container config nothing can start is a file, not a container. `flake.nix`'s
+# `default` module therefore imports the two together, and anything importing this one alone is
+# expected to import that one too. Cited from modules/README.md, modules/containers/README.md and
+# flake.nix; this is the note they mean.
 #
 # THIS IS THE MODULE THE WHOLE REPO EXISTS FOR: `deliver` below takes CATEGORY NAMES, resolved
 # against `nixstorage.delivery.categories`, rather than a host path hardcoded as a string
@@ -233,6 +243,70 @@ let
           newly-declared container should not silently start running before an operator has
           actually looked at it, the same reasoning nixvm's own `guests.<name>.autostart`
           states for libvirt's identical autostart flag.
+
+          UNDER `nixlxc.host.runtimeManagedElsewhere` THIS OPTION RENDERS A LINE AND NOTHING
+          READS IT. That mode exists precisely because the host's containers are started by
+          somebody else's unit, so `lxc.service` is not present to run the autostart pass --
+          `lxc.start.auto = 1` will not bring a container up, and `= 0` will not keep one down
+          if the owning unit wants it. The flag is still worth stating there (it records a
+          decision, which is the whole argument for printing both directions -- see
+          `lib/lxc-config.nix`'s `autostartLine`), but the runtime owner is the only thing that
+          can honour it, and this module cannot check that it did.
+        '';
+      };
+
+      mountAuto = lib.mkOption {
+        type = lib.types.str;
+        default = "cgroup:mixed proc:mixed sys:mixed";
+        example = "proc:rw sys:rw cgroup:rw:force";
+        description = ''
+          What liblxc mounts into the container for itself (`lxc.mount.auto`), verbatim.
+
+          The default is liblxc 7.0.0's own, from its `share/lxc/config/common.conf`. `mixed`
+          mounts each tree read-only and then remounts back the part the container legitimately
+          owns -- its own cgroup, `/proc/sys/net` -- so an init system inside still manages its
+          own slices and its own network sysctls.
+
+          `rw` hands over the HOST's tree entire, and on a PRIVILEGED container (`idmap = null`,
+          so the container's uid 0 IS the host's and it shares the host user namespace) that is
+          a confinement decision rather than a convenience: with `proc:rw`, `/proc/sys` is the
+          host's and writable, which makes `/proc/sys/kernel/sysrq` and `/proc/sysrq-trigger`
+          writable from inside. Anything that can write both can reboot the host, so a
+          `capabilities.drop` containing `sys_boot` no longer bounds what it reads as bounding.
+          Measured, not inferred -- see studies/adopting-a-live-container.md.
+
+          Stated per container rather than fixed by this module because a container that needs
+          the wider shape is a legitimate thing to declare; what is not legitimate is inheriting
+          it from a renderer's hardcode and believing a capability drop still holds.
+        '';
+      };
+
+      seccompProfile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/run/current-system/sw/share/lxc/config/common.seccomp";
+        description = ''
+          Path to a seccomp profile (`lxc.seccomp.profile`), or `null` for no filter at all.
+
+          `null` is the default because this module never includes liblxc's upstream config, so
+          there is no profile to inherit and pretending otherwise would be worse than saying
+          nothing. It is worth knowing what `null` buys: `Seccomp: 0` in the container init's
+          `/proc/<pid>/status`, every syscall reachable. liblxc's own `common.conf` sets a
+          profile for privileged containers, and a container declaring `idmap = null` is exactly
+          the case it has in mind.
+        '';
+      };
+
+      apparmorProfile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "lxc-container-default-cgns";
+        description = ''
+          AppArmor profile to confine the container with (`lxc.apparmor.profile`), or `null` to
+          set no label. `unconfined` is a real and different answer from `null`: it states that
+          confinement was considered and declined, where `null` renders no key at all. On a host
+          with no AppArmor loaded, neither does anything -- which is itself worth stating rather
+          than leaving a reader to infer from silence.
         '';
       };
 
@@ -609,6 +683,12 @@ let
     hooks = cfg.${name}.hooks;
     devices = cfg.${name}.devices;
     entries = cfg.${name}.mounts;
+
+    # Confinement. `mountAuto` is the one value here whose default CHANGES what this module used
+    # to emit -- it was a hardcode in the renderer, and the hardcoded value was the permissive one.
+    mountAuto = cfg.${name}.mountAuto;
+    seccompProfile = cfg.${name}.seccompProfile;
+    apparmorProfile = cfg.${name}.apparmorProfile;
   };
 
   # ── Cross-check against nixhost: the two declarations must agree on WHAT this is ───────────
@@ -682,10 +762,21 @@ in
 
           Or, if liblxc is already running here under some other owner (a bespoke module, a
           foreign-distro plane, an inherited setup being migrated), say so:
-          nixlxc.host.runtimeManagedElsewhere = true. That installs nothing at all and leaves the
-          container rendering and materialisation to this module while the runtime stays where it
-          is. `nixlxc.host.containersPath` is still required either way, because the renderer has
-          to know where containers are kept.
+          nixlxc.host.runtimeManagedElsewhere = true. That installs nothing at all.
+
+          READ THIS BEFORE SETTING IT: under that flag this module RENDERS AND STOPS. It does not
+          install the rendered config at the lxcpath, because ordering that copy correctly needs
+          two facts only the runtime's owner has -- which unit starts these containers, and what
+          that unit must be ordered after. Guessing produced, on a real host: a wants-link to a
+          unit that did not exist, a write that landed before the pool holding the target had
+          mounted, and a rewrite of a live config AFTER the container had already started from it.
+          So the rendered text is published (`/etc/nixlxc/containers/<name>.config`) and copying it
+          into place is the owner's job. Name whatever does that in `nixlxc.host.materialisedBy`.
+          A container whose config is never installed boots from a stale file indefinitely, with
+          nothing to say so -- that is the failure this paragraph exists to prevent.
+
+          `nixlxc.host.containersPath` is still required either way, because the renderer has to
+          know where containers are kept.
         '';
       }
     ]

@@ -53,13 +53,15 @@ Found only by diffing the built render against the live object.
 
 Device nodes were bound through `/dev/dri/by-path/…` precisely because a card *number* is an
 enumeration order decided by driver probe order, and it moves — it had already moved once, pointing
-four references at the wrong silicon for nine days.
+four references at the wrong silicon for three days (the 2026-07-29 host reboot until the
+by-path fix landed in-tree on 2026-08-01).
 
 By-path fixes the **mount**. It cannot fix the **cgroup rule**, because cgroup v2's device filter is
 a kernel ABI keyed on `major:minor` with no path form. So the mount binds the right hardware while
 the rule may deny the very node just bound: the node is present, every `open()` refused, nothing
 logged. `/dev/kfd`'s major was `register_chrdev(0, …)` — handed out at module load — and went
-242 → 235 → 234 across three months, leaving ROCm denied while the container reported healthy.
+242 → 235 → 234 across 64 days (2026-06-16, 2026-08-01, 2026-08-19 -- three
+numbers for one device in nine weeks), leaving ROCm denied while the container reported healthy.
 
 **Declaring puts every such number in one typed place; only a runtime check can say whether it is
 still true.** Build both, and be explicit about which answers what.

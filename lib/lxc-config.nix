@@ -1,6 +1,8 @@
 # lib/lxc-config.nix
 #
-# Pure rendering: (name, rootfsPath, initCmd, mounts, idmap, limits, autostart, extraConfig)
+# Pure rendering: a container's facts -- identity (name, arch, rootfsPath, initCmd), storage
+# (mounts, entries), hardware (network, devices, autodev, hooks), confinement (idmap,
+# capsDrop, mountAuto, seccompProfile, apparmorProfile), limits, autostart, extraConfig
 # -> a liblxc container `.config` document, as a plain string. No `config`, no NixOS module
 # system, no derivations -- this file only ever sees plain Nix values, so it is testable in
 # total isolation (see checks/default.nix's "config-render/*" group, which calls it directly
@@ -30,7 +32,13 @@
 { lib }:
 
 let
-  rel = p: lib.removePrefix "/" p;
+  # EVERY leading slash, not one. liblxc mount targets are container-relative, and it skips an
+  # entry whose target is absolute -- silently. `removePrefix "/"` turns "//dev/x" into
+  # "/dev/x", which is still absolute and still silently skipped, so a caller who wrote one
+  # slash too many lost a mount with nothing said. Strip to a fixed point instead.
+  rel = p:
+    let stripped = lib.removePrefix "/" p; in
+    if stripped == p then p else rel stripped;
 
   # A plain recursive bind (not `bind`, to match this family's OWN prior art: a category's
   # `source` may itself hide further mounts nested underneath it -- a ZFS dataset with its own
@@ -89,8 +97,25 @@ let
   # a direct caller has no module system applying option defaults on its behalf. The defaults match
   # the option surface's own, so both callers render identically.
   entryLine = e:
-    "lxc.mount.entry = ${e.source} ${rel e.target} ${e.fsType or "none"} "
-    + "${lib.concatStringsSep "," (e.options or [ "bind" "create=file" ])} 0 0";
+    let
+      target = rel e.target;
+      options = e.options or [ "bind" "create=file" ];
+    in
+    # REFUSED, not rendered, because liblxc MISPARSES these rather than rejecting them and a
+    # misparse is silent. An fstab line is delimited by whitespace RUNS, so an empty option
+    # list renders "SOURCE TARGET none  0 0" and the fstype column is read as `0`; a target
+    # that normalises away renders the source into the target column. Both produce a running
+    # container missing a mount it was told to make.
+    if target == "" then
+      throw ("nixlxc: mount entry target ${toString e.target} is the container root; a "
+        + "liblxc mount target is container-relative and must name a path under it.")
+    else if options == [ ] then
+      throw ("nixlxc: mount entry for ${target} has an empty option list; liblxc parses an "
+        + "fstab line on whitespace runs, so an empty options column silently shifts every "
+        + "field after it. State the options (\"bind\", \"defaults\", ...) outright.")
+    else
+      "lxc.mount.entry = ${e.source} ${target} ${e.fsType or "none"} "
+      + "${lib.concatStringsSep "," options} 0 0";
 
   # ── Network ──────────────────────────────────────────────────────────────────────────────────
   # Indexed, because liblxc's own key is: several interfaces are `lxc.net.0.*`, `lxc.net.1.*`, and
@@ -101,11 +126,15 @@ let
       (i: n:
         let k = key: "lxc.net.${toString i}.${key}"; in
         lib.concatStringsSep "\n" (
+          # `or` on every optional field, for the reason entryLine states: a direct caller has no
+          # module system applying option defaults on its behalf, and the whole-attrset default at
+          # the argument list only fires when the key is omitted ENTIRELY. Without these, a caller
+          # passing `{ type; link; }` got `attribute 'up' missing` from inside this file.
           [ "${k "type"} = ${n.type}" ]
-          ++ lib.optional (n.link != null) "${k "link"} = ${n.link}"
-          ++ lib.optional n.up "${k "flags"} = up"
-          ++ lib.optional (n.name != null) "${k "name"} = ${n.name}"
-          ++ lib.optional (n.hwaddr != null) "${k "hwaddr"} = ${n.hwaddr}"
+          ++ lib.optional ((n.link or null) != null) "${k "link"} = ${n.link}"
+          ++ lib.optional (n.up or false) "${k "flags"} = up"
+          ++ lib.optional ((n.name or null) != null) "${k "name"} = ${n.name}"
+          ++ lib.optional ((n.hwaddr or null) != null) "${k "hwaddr"} = ${n.hwaddr}"
         ))
       nets);
 
@@ -116,9 +145,16 @@ let
   # to choose.
   deviceLines = devices:
     lib.concatStringsSep "\n" (
-      lib.optional devices.denyAll "lxc.cgroup2.devices.deny = a"
-      ++ map (a: "lxc.cgroup2.devices.allow = ${a}") devices.allow
+      lib.optional (devices.denyAll or false) "lxc.cgroup2.devices.deny = a"
+      ++ map (a: "lxc.cgroup2.devices.allow = ${a}") (devices.allow or [ ])
     );
+
+  # Confinement, both omittable and both meaning something when omitted. liblxc 7.0.0 ships a
+  # seccomp profile for privileged containers in its own `common.conf`; a container that
+  # includes no upstream config and sets neither of these runs with `Seccomp: 0` and no
+  # AppArmor label. That is a valid choice and a bad accident, which is why it is stated.
+  seccompLine = p: lib.optionalString (p != null) "lxc.seccomp.profile = ${p}";
+  apparmorLine = p: lib.optionalString (p != null) "lxc.apparmor.profile = ${p}";
 
   capLine = caps: lib.optionalString (caps != [ ])
     "lxc.cap.drop = ${lib.concatStringsSep " " caps}";
@@ -126,7 +162,7 @@ let
   autodevLine = autodev: lib.optionalString autodev "lxc.autodev = 1";
 
   hookLines = hooks:
-    lib.concatStringsSep "\n" (lib.optional (hooks.preStart != null)
+    lib.concatStringsSep "\n" (lib.optional ((hooks.preStart or null) != null)
       "lxc.hook.pre-start = ${hooks.preStart}");
 in
 {
@@ -149,6 +185,14 @@ in
     , hooks ? { preStart = null; }
     , devices ? { denyAll = false; allow = [ ]; }
     , entries ? [ ]
+      # Confinement. The defaults are liblxc 7.0.0's own (`share/lxc/config/common.conf`)
+      # for mountAuto, and "state it or you do not have it" for the other two. NOTE this is
+      # the one argument whose default is deliberately NOT what this renderer emitted before
+      # it existed: the previous hardcode was `proc:rw sys:rw cgroup:rw:force`, which a
+      # container inherits only by asking for it now.
+    , mountAuto ? "cgroup:mixed proc:mixed sys:mixed"
+    , seccompProfile ? null
+    , apparmorProfile ? null
     }: ''
     lxc.uts.name = ${name}
     lxc.arch = ${arch}
@@ -162,11 +206,16 @@ in
     ${capLine capsDrop}
     ${autodevLine autodev}
 
-    # proc/sys/cgroup delegation -- fixed, not host-specific: any init system this module might
-    # hand a rootfs to needs these to manage its own systemd (or equivalent) slices. Baked in
-    # here rather than left to `extraConfig` because every container this module can define
-    # needs it identically; see modules/containers/README.md.
-    lxc.mount.auto = proc:rw sys:rw cgroup:rw:force
+    # proc/sys/cgroup delegation. `mixed` mounts each read-only and then remounts the subtree
+    # the container legitimately owns (its own cgroup, /proc/sys/net) writable; `rw` hands
+    # over the HOST tree entire. On a PRIVILEGED container -- no idmap, host user namespace
+    # -- `proc:rw` means /proc/sys/kernel/sysrq and /proc/sysrq-trigger are writable from
+    # inside, so a dropped `sys_boot` capability no longer bounds reboot. Declared per
+    # container rather than baked in here, because it is a confinement decision and the
+    # honest place for one is the config a reader greps.
+    lxc.mount.auto = ${mountAuto}
+    ${seccompLine seccompProfile}
+    ${apparmorLine apparmorProfile}
 
     ${deviceLines devices}
 

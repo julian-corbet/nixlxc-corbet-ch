@@ -29,7 +29,32 @@ stopping, or restarting a container remains entirely an operator action (see
 | `nixlxc.containers.<name>.idmap.count` | positive int | `65536` | Size of the mapped uid/gid range. |
 | `nixlxc.containers.<name>.autostart` | bool | `false` | Started at HOST boot via the upstream `lxc.service` pass — see `modules/lxc-host`. |
 | *(no resource ceiling option)* | — | — | **Read from `nixhost.environments.<name>.resources`, matched by name.** `ram.limitMiB` renders `lxc.cgroup2.memory.max`; `cpu.quotaCores` renders `lxc.cgroup2.cpu.max`. Absent nixhost renders neither — an unbounded container is liblxc's own default, and inventing a number here would both make a silent resourcing decision and disarm nixhost's oversubscription arithmetic. |
-| `nixlxc.containers.<name>.extraConfig` | lines | `""` | Escape hatch: raw liblxc config lines appended verbatim. |
+| `nixlxc.containers.<name>.extraConfig` | lines | `""` | Escape hatch: raw liblxc config lines appended verbatim. A container needing this for something in the table below is a gap in the table, not a use of the hatch. |
+
+### The hardware half
+
+Facts about what the container *is*, rather than policy this module holds. **Each renders nothing
+at its default**, so a container declaring none of them is byte-for-byte what this module produced
+before they existed.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `…<name>.arch` | str | `"linux64"` | `lxc.arch` personality. `linux32` for a 32-bit rootfs on a 64-bit host. |
+| `…<name>.network` | list of submodule | `[ ]` | Interfaces **in order** — the liblxc index (`lxc.net.0`, `lxc.net.1`) comes from list position, never from the caller. Per entry: `type`, `link`, `up`, `name`, `hwaddr`. Empty renders no network keys at all, which is liblxc's own "inherit the host's" default. |
+| `…<name>.mounts` | list of submodule | `[ ]` | General `lxc.mount.entry` lines: `source`, `target`, `fsType`, `options`. For device nodes and any bind this module does not resolve from a category. (`deliver` above is the resolved-from-a-name path; this is the stated-outright one.) |
+| `…<name>.devices.denyAll` | bool | `false` | Emit `lxc.cgroup2.devices.deny = a` **before** the allowlist. The order is the mechanism, not tidiness, and it is not the caller's to choose. |
+| `…<name>.devices.allow` | list of str | `[ ]` | cgroup2 device rules, e.g. `"c 226:0 rwm"`. A bare `"a"` is **refused** — liblxc documents it as clearing every previous rule, so it discards `denyAll` silently. |
+| `…<name>.autodev` | bool | `false` | `lxc.autodev = 1` — liblxc populates a small `/dev` for the container. |
+| `…<name>.capabilities.drop` | list of str | `[ ]` | `lxc.cap.drop`. Empty by default: which capabilities a workload needs is a fact about the workload. |
+| `…<name>.hooks.preStart` | null or str | `null` | `lxc.hook.pre-start`, run on the HOST before the container starts. Fail-closed by convention; see the option doc. |
+
+### Confinement
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `…<name>.mountAuto` | str | `"cgroup:mixed proc:mixed sys:mixed"` | `lxc.mount.auto`, verbatim. The default is liblxc 7.0.0's own: `mixed` mounts each tree read-only, then remounts back what the container owns. **`rw` is a confinement decision on a privileged container** — with `proc:rw`, `/proc/sys` is the host's and writable, so `/proc/sys/kernel/sysrq` and `/proc/sysrq-trigger` are reachable and a dropped `sys_boot` no longer bounds reboot. Measured; see `studies/adopting-a-live-container.md`. |
+| `…<name>.seccompProfile` | null or str | `null` | `lxc.seccomp.profile`. `null` renders no key and means **no filter at all** (`Seccomp: 0`), because this module includes none of liblxc's upstream config and so inherits none of its profile. |
+| `…<name>.apparmorProfile` | null or str | `null` | `lxc.apparmor.profile`. `"unconfined"` is a different answer from `null`: it records that confinement was declined, where `null` records that nobody said. |
 
 ## `deliver` vs `idmap` — two defensive reads, two different failure modes
 

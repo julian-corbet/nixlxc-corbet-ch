@@ -63,6 +63,20 @@ let
       (builtins.unsafeDiscardStringContext (evalNixos extraModules).system.build.toplevel.drvPath)
       true)).success;
 
+  # WHAT `buildFails` DOES NOT PROVE: it reports THAT evaluation failed, never why. A check named
+  # for one refusal therefore stays green if an unrelated throw takes its place -- rename an option
+  # a fixture sets and every refusal check "passes" while testing nothing. That is fine for the
+  # structural cases below (where the fixture is one line and the failure has one candidate cause)
+  # and not fine for a refusal this module states in its own words, because the message IS the
+  # feature. `failsWith` reads the assertion list instead of forcing a derivation, so it can match
+  # the text a reader would actually be shown; a fixture that fails for some other reason makes the
+  # whole `assertions` read throw, `tryEval` catches it, and the check goes RED rather than green.
+  failsWith = infix: extraModules:
+    let r = builtins.tryEval
+      (lib.any (a: !a.assertion && lib.hasInfix infix a.message)
+        (evalNixos extraModules).assertions);
+    in r.success && r.value;
+
   baseHost = {
     nixlxc.host = {
       enable = true;
@@ -258,11 +272,27 @@ in
             (configText cfg-external-runtime "example-container"))
           "the container must still be rendered when the runtime belongs to somebody else")
 
+        # ALL FOUR attributes the `enable` branch sets, not the two that were easiest to reach.
+        # A check that covers half of what it is named for lets the other half regress silently:
+        # `systemConfig` writes an lxcpath into /etc/lxc/default.conf and `systemd.packages` pulls
+        # in the unit file pkgs.lxc ships. NOT `systemd.packages == [ ]` -- base NixOS puts six
+        # packages there before this module is even composed, and asserting emptiness tests the
+        # baseline rather than the carve-out (it failed exactly that way when first written). The
+        # question is whether THIS module's lxc package is among them; either leak would mean
+        # this module is quietly co-owning a runtime it has declared belongs to somebody else --
+        # exactly the two-owners state the enable/runtimeManagedElsewhere assertion refuses.
         (check "external-runtime/installs-no-liblxc-runtime-of-its-own"
           (!cfg-external-runtime.virtualisation.lxc.enable
-            && !(cfg-external-runtime.systemd.services ? lxc))
+            && !(cfg-external-runtime.systemd.services ? lxc)
+            && cfg-external-runtime.virtualisation.lxc.systemConfig == ""
+            && !(lib.elem cfg-external-runtime.virtualisation.lxc.package
+                   cfg-external-runtime.systemd.packages))
           ("declaring the runtime external must install NOTHING: got lxc.enable="
-            + builtins.toJSON cfg-external-runtime.virtualisation.lxc.enable))
+            + builtins.toJSON cfg-external-runtime.virtualisation.lxc.enable
+            + ", systemConfig=" + builtins.toJSON cfg-external-runtime.virtualisation.lxc.systemConfig
+            + ", lxc package in systemd.packages="
+            + builtins.toJSON (lib.elem cfg-external-runtime.virtualisation.lxc.package
+                cfg-external-runtime.systemd.packages)))
 
         # THIS ASSERTED THE OPPOSITE UNTIL 2026-08-19, and the assumption behind it was wrong.
         # Materialising needs an ordering edge -- after the storage holding containersPath, before
@@ -316,7 +346,7 @@ in
           "neither enable nor runtimeManagedElsewhere: the rendered config could never be started")
 
         (check "external-runtime/claiming-both-owners-is-refused"
-          (buildFails [
+          (failsWith "two owners of one runtime" [
             {
               nixlxc.host = {
                 enable = true;
@@ -328,7 +358,7 @@ in
           "they are alternatives; both set means which runtime is authoritative is decided by merge order")
 
         (check "external-runtime/containersPath-is-still-required"
-          (buildFails [
+          (failsWith "nixlxc.host.containersPath must be set" [
             { nixlxc.host.runtimeManagedElsewhere = true; }
             { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }
           ])
@@ -338,7 +368,7 @@ in
         # liblxc: a bare  allow rule clears every previous rule, so it does not add a
         # permission -- it discards denyAll and the whole allowlist above it, silently.
         (check "devices/a-bare-allow-everything-rule-is-refused"
-          (buildFails [
+          (failsWith "bare allow-everything device rule" [
             baseHost
             { nixlxc.containers.example-container = {
                 rootfs.path = "/var/lib/nixlxc/roots/example";
@@ -710,6 +740,10 @@ in
 
       render = args: lxcConfigLib.mkContainerConfig (baseArgs // args);
 
+      # Forcing the rendered STRING is what reaches a throw raised inside an interpolation --
+      # `mkContainerConfig` itself returns without evaluating its body.
+      renderThrows = args: !(builtins.tryEval (builtins.seq (render args) true)).success;
+
       results = [
         (check "config-render/rootfs-dir-mode"
           (lib.hasInfix "lxc.rootfs.path = dir:/example/rootfs" (render { }))
@@ -805,9 +839,65 @@ in
           (lib.hasInfix "lxc.init.cmd = /sbin/init" (render { }))
           "rendered: ${render { }}")
 
-        (check "config-render/proc-sys-cgroup-delegation-always-present"
-          (lib.hasInfix "lxc.mount.auto = proc:rw sys:rw cgroup:rw:force" (render { }))
+        # ── Confinement ───────────────────────────────────────────────────────────────────
+        # `lxc.mount.auto` used to be a hardcode in the renderer with no option above it, and the
+        # hardcoded value was the permissive one. These pin the SAFE default and the override, in
+        # that order, because the danger is a caller inheriting `rw` without ever naming it.
+        (check "config-render/mount-auto-defaults-to-liblxc-upstream-mixed"
+          (lib.hasInfix "lxc.mount.auto = cgroup:mixed proc:mixed sys:mixed" (render { }))
           "rendered: ${render { }}")
+
+        (check "config-render/mount-auto-renders-an-override-verbatim"
+          (
+            let r = render { mountAuto = "proc:rw sys:rw cgroup:rw:force"; }; in
+            lib.hasInfix "lxc.mount.auto = proc:rw sys:rw cgroup:rw:force" r
+            && !(lib.hasInfix "cgroup:mixed" r)
+          )
+          "rendered: ${render { mountAuto = "proc:rw sys:rw cgroup:rw:force"; }}")
+
+        # Absence is the default and it must render NO key -- an empty `lxc.seccomp.profile =`
+        # line is not the same fact as no line, and liblxc would read it as a path.
+        (check "config-render/seccomp-and-apparmor-render-nothing-by-default"
+          (
+            let r = render { }; in
+            !(lib.hasInfix "lxc.seccomp.profile" r) && !(lib.hasInfix "lxc.apparmor.profile" r)
+          )
+          "rendered: ${render { }}")
+
+        (check "config-render/seccomp-and-apparmor-render-when-set"
+          (
+            let r = render { seccompProfile = "/etc/lxc/x.seccomp"; apparmorProfile = "unconfined"; }; in
+            lib.hasInfix "lxc.seccomp.profile = /etc/lxc/x.seccomp" r
+            && lib.hasInfix "lxc.apparmor.profile = unconfined" r
+          )
+          "rendered: ${render { seccompProfile = "/etc/lxc/x.seccomp"; apparmorProfile = "unconfined"; }}")
+
+        # ── entryLine: the shapes liblxc MISPARSES rather than rejects ─────────────────────
+        # An fstab line is delimited by whitespace RUNS, so a field that renders empty shifts
+        # every field after it and liblxc reads a different mount than the one declared -- with
+        # no error. These are refusals for that reason, not style.
+        (check "config-render/entry-target-is-stripped-to-a-fixed-point"
+          (
+            let r = render { entries = [ { source = "/dev/kfd"; target = "//dev/kfd"; } ]; }; in
+            lib.hasInfix "lxc.mount.entry = /dev/kfd dev/kfd none bind,create=file 0 0" r
+          )
+          "a target liblxc still reads as absolute is one it silently skips: ${render { entries = [ { source = "/dev/kfd"; target = "//dev/kfd"; } ]; }}")
+
+        (check "config-render/entry-with-empty-options-is-refused"
+          (renderThrows { entries = [ { source = "/dev/kfd"; target = "/dev/kfd"; options = [ ]; } ]; })
+          "empty options render a double space, so liblxc reads the 0 as the fstype")
+
+        (check "config-render/entry-targeting-the-container-root-is-refused"
+          (renderThrows { entries = [ { source = "tmpfs"; target = "/"; fsType = "tmpfs"; options = [ "ro" ]; } ]; })
+          "a target that normalises to empty renders the source into the target column")
+
+        # The `or` fallbacks a DIRECT caller gets (no module system applying option defaults)
+        # must match the option surface's own, or the two callers render differently. Every other
+        # fixture supplies both fields, so nothing else would notice them drifting.
+        (check "config-render/entry-fallback-defaults-match-the-option-surface"
+          (lib.hasInfix "lxc.mount.entry = /dev/dri dev/dri none bind,create=file 0 0"
+            (render { entries = [ { source = "/dev/dri"; target = "/dev/dri"; } ]; }))
+          "rendered: ${render { entries = [ { source = "/dev/dri"; target = "/dev/dri"; } ]; }}")
 
         (check "config-render/idmap-lines-when-set"
           (
@@ -832,19 +922,16 @@ in
           (lib.hasInfix "lxc.cgroup2.cpu.max = 400000 100000" (render { limits = { memoryMiB = null; cpuCores = 4; }; }))
           "rendered: ${render { limits = { memoryMiB = null; cpuCores = 4; }; }}")
 
-        (check "config-render/autostart-line-when-true"
-          (lib.hasInfix "lxc.start.auto = 1" (render { autostart = true; }))
-          "rendered: ${render { autostart = true; }}")
-
-        # WAS "no autostart line when false", and the change is deliberate. Omitting the line
-        # rendered the same BEHAVIOUR -- 0 is liblxc's own default -- while recording a different
-        # FACT: silence says only that nobody wrote a line, where `lxc.start.auto = 0` says somebody
-        # decided this container does not come up with the host. For a container deliberately kept
-        # out of autostart those are not the same thing, and the silent version invites a future
-        # reader to "fix" it. Safe to change: no consumer composes this module yet.
-        (check "config-render/autostart-false-states-the-decision-rather-than-omitting-it"
-          (lib.hasInfix "lxc.start.auto = 0" (render { autostart = false; }))
-          "rendered: ${render { autostart = false; }}")
+        # TWO CHECKS REMOVED HERE rather than kept for the count. They asserted
+        # `lxc.start.auto = 1` and `= 0` in isolation, and `autostart-is-stated-in-both-directions`
+        # above already asserts BOTH conjuncts -- so neither could fail while that one passed, and
+        # a suite reporting three passes for one property overstates its own coverage.
+        #
+        # Their reason for existing survives them and is worth keeping: printing `= 0` rather than
+        # omitting the line renders the same BEHAVIOUR (0 is liblxc's own default) while recording
+        # a different FACT -- silence says only that nobody wrote a line, where `lxc.start.auto = 0`
+        # says somebody decided this container does not come up with the host. That argument now
+        # lives once, next to `autostartLine` in lib/lxc-config.nix, instead of in three places.
 
         (check "config-render/mount-line-rendered-relative-and-rbind"
           (lib.hasInfix "lxc.mount.entry = /example/media media none rbind,create=dir 0 0"

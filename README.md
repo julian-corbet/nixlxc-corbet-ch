@@ -100,7 +100,18 @@ required `containersPath`, a container missing its rootfs or memory allocation, 
 unresolved `idmap.base` (declared or not) all fail evaluation by name rather than producing
 something half-formed — while an unresolved `deliver` name on a host that has never declared
 `nixstorage` at all stays completely silent, on purpose (see `modules/containers/README.md`).
-Nothing here has yet hosted a container on real hardware; that is the next step, not this one.
+**It hosts a real container now.** corbet-server's arch desktop LXC -- a privileged, GPU-bearing,
+USB- and audio-passthrough workstation container with fourteen device binds, a twenty-two-rule
+deny-by-default cgroup policy and fourteen dataset-backed mounts -- is declared entirely through
+these options and rendered by this module. It uses **no `extraConfig` at all**, which is the
+sharpest statement available about whether the option surface is complete: an escape hatch that
+nothing reaches for is a boundary that holds.
+
+That adoption is also where most of this repo's sharper edges came from, and they are written up
+in [`studies/adopting-a-live-container.md`](studies/adopting-a-live-container.md) rather than
+left as folklore -- an immutable selector that makes adoption and replacement different acts, a
+probe merge that silently produces an invalid object, and device majors that no amount of
+declaring can stabilise.
 
 ## License
 

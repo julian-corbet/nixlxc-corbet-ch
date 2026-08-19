@@ -88,11 +88,13 @@ single human `$HOME` the way a desktop session does, so a delivered category sur
 at `/<home>` under the container's own filesystem root (`/media`, `/work`, …) — see
 `lib/lxc-config.nix`'s own header for the full reasoning.
 
-## What is deliberately NOT modeled in this first cut
+## What is deliberately NOT modeled
 
-- **Network attachment** (a veth device, a bridge). No option surface for it — this module was
-  built to fix `deliver`/`idmap` correctness, not to be a complete container definition. Attach
-  one via `extraConfig` until it earns a dedicated option.
+Network attachment used to head this list, with `extraConfig` named as the workaround. It is
+modeled now (`network`, indexed from list position), along with capability drops, `autodev`, the
+pre-start hook, the deny-then-allow device policy and general mount entries — because a real
+container needed every one of them, and a module whose escape hatch carries the substance is a
+text file with a Nix wrapper. What remains below is genuinely out of scope, not merely unbuilt.
 - **Any rootfs backend other than a plain host directory** (`dir:`). A zvol-backed or
   image-backed rootfs is future scope.
 - **Multiple, discontiguous idmap ranges.** `idmap.base`/`.count` render a single contiguous

@@ -96,6 +96,41 @@ let
     }
   ];
 
+  # ── THE HARDWARE HALF, WIRED THROUGH THE MODULE ────────────────────────────────────────
+  # Every option below is one this module hands to lib/lxc-config.nix in `renderedConfigFor`.
+  # Until this fixture existed, NO eval fixture declared any of them: the config-render/* group
+  # calls the renderer directly and never sees the wiring, so severing a single line of it --
+  # `entries = cfg.<name>.mounts` -> `entries = [ ]` -- rendered a container with ZERO mount
+  # entries (no /home, no shared /nix, no device nodes) and all 73 checks stayed green.
+  #
+  # That is this repo's own study finding #6 one layer up: a check that cannot fail on the
+  # mutation it is named for. The assertions below are written against the RENDERED TEXT of a
+  # container declared through the options, so cutting any wire fails by name.
+  cfg-hardware = evalNixos [
+    baseHost
+    {
+      nixlxc.containers.example-container = {
+        rootfs.path = "/var/lib/nixlxc/roots/example";
+        arch = "linux32";
+        autodev = true;
+        hooks.preStart = "/example/guard.sh";
+        capabilities.drop = [ "sys_module" "sys_boot" ];
+        network = [
+          { type = "veth"; link = "example-br0"; up = true; name = "eth0"; hwaddr = "00:16:3e:00:00:01"; }
+          { type = "veth"; link = "example-br1"; up = false; name = "eth1"; hwaddr = null; }
+        ];
+        devices = {
+          denyAll = true;
+          allow = [ "c *:* m" "c 1:3 rwm" "c 226:0 rwm" ];
+        };
+        mounts = [
+          { source = "/dev/example-node"; target = "/dev/example-node"; fsType = "none"; options = [ "bind" "create=file" ]; }
+          { source = "tmpfs"; target = "sys/example"; fsType = "tmpfs"; options = [ "ro" "size=4k" "create=dir" ]; }
+        ];
+      };
+    }
+  ];
+
   cfg-container-autostart = evalNixos [
     baseHost
     {
@@ -139,6 +174,24 @@ let
       nixlxc.containers.example-container = {
         rootfs.path = "/var/lib/nixlxc/roots/example";
         idmap.base = "container-base";
+      };
+    }
+  ];
+
+  # ── uid != gid, which is the only shape that can see a u/g swap ────────────────────────
+  # Every other idmap fixture here resolves an identity whose `gid` is unset -- a User Private
+  # Group, numerically equal to the uid -- so `lxc.idmap = u ...` and `= g ...` carry the SAME
+  # number and swapping the two arguments in the renderer changes nothing observable. That is
+  # precisely the failure this repo says must never pass quietly: a container silently more
+  # privileged, or differently privileged, than declared.
+  cfg-idmap-split = evalNixos [
+    baseHost
+    stubs.posixStub
+    {
+      nixiam.posix.identities.example-split = { uid = 100000; gid = 200000; };
+      nixlxc.containers.example-container = {
+        rootfs.path = "/var/lib/nixlxc/roots/example";
+        idmap.base = "example-split";
       };
     }
   ];
@@ -280,6 +333,78 @@ in
             { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }
           ])
           "the renderer has to know where the other owner keeps its containers")
+
+        # ── The module -> renderer join, per option. Each of these fails if its wire is cut. ──
+        # liblxc: a bare  allow rule clears every previous rule, so it does not add a
+        # permission -- it discards denyAll and the whole allowlist above it, silently.
+        (check "devices/a-bare-allow-everything-rule-is-refused"
+          (buildFails [
+            baseHost
+            { nixlxc.containers.example-container = {
+                rootfs.path = "/var/lib/nixlxc/roots/example";
+                devices = { denyAll = true; allow = [ "c 1:3 rwm" "a" ]; };
+              }; }
+          ])
+          "a bare a rule clears denyAll and every rule above it, leaving a container that reads as restricted and is not")
+
+        (check "devices/an-ordinary-allowlist-is-still-accepted"
+          (!(buildFails [
+            baseHost
+            { nixlxc.containers.example-container = {
+                rootfs.path = "/var/lib/nixlxc/roots/example";
+                devices = { denyAll = true; allow = [ "c 1:3 rwm" "c *:* m" ]; };
+              }; }
+          ]))
+          "refusing every allowlist would make the option unusable -- only the bare clear-everything form is wrong")
+
+        (check "idmap/u-and-g-are-not-interchangeable"
+          (
+            let t = configText cfg-idmap-split "example-container"; in
+            lib.hasInfix "lxc.idmap = u 0 100000 " t
+            && lib.hasInfix "lxc.idmap = g 0 200000 " t
+          )
+          "text: ${configText cfg-idmap-split "example-container"} -- a uid base on the g line (or vice versa) gives the container a different privilege set than declared, and every other fixture here has uid == gid so it cannot see the swap")
+
+        (check "hardware/mounts-reach-the-render"
+          (
+            let t = configText cfg-hardware "example-container"; in
+            lib.hasInfix "lxc.mount.entry = /dev/example-node dev/example-node none bind,create=file 0 0" t
+            && lib.hasInfix "lxc.mount.entry = tmpfs sys/example tmpfs ro,size=4k,create=dir 0 0" t
+          )
+          "text: ${configText cfg-hardware "example-container"}")
+
+        (check "hardware/network-reaches-the-render-indexed-by-position"
+          (
+            let t = configText cfg-hardware "example-container"; in
+            lib.hasInfix "lxc.net.0.type = veth" t
+            && lib.hasInfix "lxc.net.0.link = example-br0" t
+            && lib.hasInfix "lxc.net.0.flags = up" t
+            && lib.hasInfix "lxc.net.0.name = eth0" t
+            && lib.hasInfix "lxc.net.0.hwaddr = 00:16:3e:00:00:01" t
+            && lib.hasInfix "lxc.net.1.link = example-br1" t
+            && !(lib.hasInfix "lxc.net.1.flags" t)
+          )
+          "text: ${configText cfg-hardware "example-container"}")
+
+        (check "hardware/devices-reach-the-render-deny-first"
+          (
+            let t = configText cfg-hardware "example-container";
+                parts = lib.splitString "lxc.cgroup2.devices.deny = a" t; in
+            lib.length parts == 2
+            && lib.hasInfix "lxc.cgroup2.devices.allow = c 1:3 rwm" (lib.elemAt parts 1)
+            && lib.hasInfix "lxc.cgroup2.devices.allow = c 226:0 rwm" (lib.elemAt parts 1)
+          )
+          "text: ${configText cfg-hardware "example-container"}")
+
+        (check "hardware/caps-autodev-hook-and-arch-reach-the-render"
+          (
+            let t = configText cfg-hardware "example-container"; in
+            lib.hasInfix "lxc.cap.drop = sys_module sys_boot" t
+            && lib.hasInfix "lxc.autodev = 1" t
+            && lib.hasInfix "lxc.hook.pre-start = /example/guard.sh" t
+            && lib.hasInfix "lxc.arch = linux32" t
+          )
+          "text: ${configText cfg-hardware "example-container"}")
 
         (check "host-only/lxc-enabled"
           cfg-host-only.virtualisation.lxc.enable

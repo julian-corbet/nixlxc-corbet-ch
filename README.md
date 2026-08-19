@@ -91,8 +91,10 @@ Concretely, three places this repo could quietly absorb scope, and doesn't:
 
 ## Status
 
-**First cut, freshly built — a clean slate, not a migration.** No LXC state survives from any
-earlier era; this repo starts from an idle liblxc stack with nothing defined on top of it. `nix
+**Built as a clean slate; proven by a migration.** It was written against an idle liblxc stack
+with nothing defined on top of it, and then adopted a container that had been running for
+months — which is a harder test than the one it was designed for, and is where its sharper
+edges came from. `nix
 flake check` proves both modules compose into a real NixOS system and render a correct liblxc
 `.config` from typed container data — and, just as deliberately, that a host missing its
 required `containersPath`, a container missing its rootfs or memory allocation, an unresolved
@@ -106,6 +108,14 @@ deny-by-default cgroup policy and fourteen dataset-backed mounts -- is declared 
 these options and rendered by this module. It uses **no `extraConfig` at all**, which is the
 sharpest statement available about whether the option surface is complete: an escape hatch that
 nothing reaches for is a boundary that holds.
+
+**One honest caveat on that.** `deliver` — the category-resolving mount surface this repo
+describes as the thing it exists for — is NOT what that container exercises. Its host has
+`nixstorage` composed but not `nixstorage.delivery`, so no category table exists to resolve
+against, and all of its mounts ride the raw `mounts` list instead, whose sources this module
+explicitly does not check. So the no-`extraConfig` result proves the HARDWARE surface is
+complete; it does not prove `deliver` works in production, because nothing has yet run it
+there. Treat that as the next thing to verify, not as something already shown.
 
 That adoption is also where most of this repo's sharper edges came from, and they are written up
 in [`studies/adopting-a-live-container.md`](studies/adopting-a-live-container.md) rather than

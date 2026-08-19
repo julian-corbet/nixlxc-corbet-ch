@@ -4,7 +4,8 @@
 # (`rootfs`), what it's allowed to run as (`idmap`), how big it's allowed to get (`limits`),
 # whether it starts with the host (`autostart`), and WHICH delivery categories it receives
 # (`deliver`) -- never a host path. This module owns rendering all of that into a real liblxc
-# `.config` document and keeping that file materialized at its canonical `lxcpath` location on
+# `.config` document and -- WHEN THIS REPO OWNS THE RUNTIME -- keeping that file materialized at
+# its canonical `lxcpath` location on
 # every activation. It never runs `lxc-start`/`lxc-stop` itself -- see "What 'kept applied'
 # means" below, the same "declare, don't force" discipline nixvm's own `modules/guests`
 # applies to `virsh define`.
@@ -18,7 +19,9 @@
 #           `deliver` entries against `nixstorage.delivery.categories` (defensively -- see
 #           below) and `idmap.base` against `nixiam.posix.identities` (also defensively);
 #           rendering all of that to a real liblxc `.config` document (`lib/lxc-config.nix`)
-#           and keeping that document materialized at `nixlxc.host.containersPath`/<name>/config
+#           and, when this repo owns the runtime, keeping that document materialized at
+#           `nixlxc.host.containersPath`/<name>/config (under `runtimeManagedElsewhere` it
+#           renders and stops -- installing it is the owner's, see that option)
 #           on every activation.
 #   NOT   : starting, stopping, or restarting a container. Materializing a `.config` file only
 #           changes what a container WILL boot into next time something starts it -- it never
@@ -36,11 +39,11 @@
 #   NOT   : owning uid/gid. `idmap.base` NAMES an identity in `nixiam.posix.identities`; this
 #           module never invents, allocates, or holds a raw uid/gid of its own beyond the
 #           `count` (a range SIZE, not an identity fact).
-#   NOT   : network attachment (a veth device, a bridge). No option surface for it in this
-#           first cut -- the task this module was built to close is `deliver`/`idmap`
-#           correctness, not a complete container definition. Attach one via `extraConfig`
-#           until it earns a dedicated option (mirrors nixvm's own escape hatch, and its
-#           "installer media" non-goal: named honestly rather than silently assumed away).
+#   OWNED : the container's HARDWARE half -- network attachment (`network`, indexed from list
+#           position), capability drops, `autodev`, the pre-start hook, the deny-then-allow
+#           cgroup device policy, and general mount entries. This list said network was NOT
+#           modeled and pointed at `extraConfig`; a real container needed all of it, and a
+#           module whose escape hatch carries the substance is a text file with a Nix wrapper.
 #
 # ── WHAT "KEPT APPLIED" MEANS FOR AN LXC CONTAINER, PRECISELY ───────────────────────────────
 # libvirt has a real, separate "declare" verb (`virsh define`) independent of whether a guest
@@ -49,7 +52,9 @@
 # the moment it runs. So the honest analogue of "kept declared" here is narrower and more
 # literal: this module renders the container's config as NixOS-managed data
 # (`environment.etc."nixlxc/containers/<name>.config"`) and a per-container systemd oneshot
-# materializes that exact text at the real path liblxc reads, ordered to run before the
+# materializes that exact text at the real path liblxc reads -- but ONLY when this repo owns
+# the runtime, because ordering that copy needs facts an external owner holds -- ordered to
+# run before the
 # upstream `lxc.service` autostart pass (see modules/lxc-host) and on every activation
 # otherwise. This oneshot only ever writes ONE file -- `<lxcpath>/<name>/config` -- and never
 # touches `<lxcpath>/<name>/rootfs` or any other data a container owns. Creating the
@@ -683,7 +688,31 @@ in
           to know where containers are kept.
         '';
       }
-    ] ++ requiredFieldAssertions ++ deliverAssertions ++ idmapAssertions ++ kindAssertions;
+    ]
+    ++ lib.concatLists (lib.mapAttrsToList
+      (name: c:
+        let bare = lib.filter (r: lib.elem r [ "a" "a *:*" ]) c.devices.allow; in
+        lib.optional (bare != [ ]) {
+          assertion = false;
+          message = ''
+            nixlxc: container `${name}` has a bare allow-everything device rule
+            (${lib.concatMapStringsSep ", " (r: "\"${r}\"") bare}) in `devices.allow`.
+
+            liblxc's own documentation: "An allowlist device rule `lxc.cgroup2.devices.allow = a`
+            will cause LXC to instruct the kernel to allow access to all devices by default ...
+            will cause all previous rules to be cleared." So this does not ADD a permission --
+            it discards `devices.denyAll` and every rule above it, silently, leaving a container
+            that reads as carefully restricted and is not restricted at all.
+
+            That is not hypothetical: it is the exact string the legacy hand-written config this
+            module replaces used, and removing it is what the deny-by-default policy was FOR.
+            List the majors the container actually needs instead. If it genuinely needs every
+            device, say so by leaving `denyAll = false` and the allowlist empty, which is
+            liblxc's permissive default and at least reads as what it is.
+          '';
+        })
+      cfg)
+    ++ requiredFieldAssertions ++ deliverAssertions ++ idmapAssertions ++ kindAssertions;
 
     # THE SHARED READ CONTRACT'S OWN OUTPUT: state (c) on any of the three siblings this module
     # reads (nixstorage.delivery.categories, nixiam.posix.identities, nixhost.environments) warns

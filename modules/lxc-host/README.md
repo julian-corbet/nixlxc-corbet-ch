@@ -53,5 +53,8 @@ always an operator action.
 
 ## Status
 
-First cut. Not yet re-verified against a live host with a real container running — see the
+Verified against a live host with a real container running: corbet-server's arch desktop
+LXC is declared entirely through these options, uses no `extraConfig`, and its rendered
+config is directive-for-directive identical to what the container had been running from —
+see the
 repo README's "Status" section.

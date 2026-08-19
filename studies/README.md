@@ -7,11 +7,13 @@ research. Cross-linked from experiments/ where a study led to a runnable experim
 
 - **[adopting-a-live-container.md](adopting-a-live-container.md)** — what it cost to move a running,
   privileged, GPU-bearing container from a hand-authored liblxc document onto these options without
-  restarting it into a different shape. Six findings, none of which produced an error: an immutable
-  field that makes adoption and replacement different acts, a merged probe that is invalid because
-  the thing merged into is a tagged union, a stable path that cannot buy a stable device number,
-  ordering that cannot be guessed on another owner's behalf, a fail-closed guard nobody could hear,
-  and eight dangerous mutations that all passed a set of checks claiming to catch them.
+  restarting it into a different shape. Six findings drawn from TWO adoptions the same day -- this
+  container, and a Kubernetes database tier six hours earlier -- with every section naming its
+  source, because a study that quietly absorbs a neighbour's evidence gets cited for things it
+  never observed. Most of them produced no error at all: a stable path that cannot buy a stable
+  device number, ordering that cannot be guessed on another owner's behalf, a fail-closed guard
+  nobody could hear, and dangerous mutations that sailed through checks written to catch them --
+  three separate times, once in this module's own test suite.
 
 ## The study this file used to promise
 

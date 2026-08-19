@@ -34,7 +34,18 @@
   outputs = { self, nixpkgs, nixhost }:
     let
       lib = nixpkgs.lib;
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      # ONLY THE SYSTEM THESE CHECKS CAN GENUINELY BE EVALUATED ON. The eval tests build real
+      # nixosSystem closures and the render tests read them back, which makes them
+      # import-from-derivation: an aarch64 check needs an aarch64 builder, so declaring it
+      # bought no coverage and made a strict all-systems flake check fail outright on any
+      # ordinary runner.
+      #
+      # Keeping aarch64 and dropping --all-systems is the worse trade and the one this family
+      # refuses: a bare flake check omits the systems it cannot evaluate and still exits 0, so
+      # CI reports green having tested half of what the flake claims. Narrow the claim, keep the
+      # check strict. The modules themselves are plain data and stay available to a consumer on
+      # any system; only checks and formatter were ever system-scoped here.
+      systems = [ "x86_64-linux" ];
       forAllSystems = f: lib.genAttrs systems f;
     in
     {

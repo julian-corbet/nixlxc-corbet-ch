@@ -211,9 +211,25 @@ in
           ("declaring the runtime external must install NOTHING: got lxc.enable="
             + builtins.toJSON cfg-external-runtime.virtualisation.lxc.enable))
 
-        (check "external-runtime/still-materialises-the-config-at-the-lxcpath"
-          (cfg-external-runtime.systemd.services ? "nixlxc-container-example-container-apply")
-          "rendering without materialising would leave the other owner reading a stale file")
+        # THIS ASSERTED THE OPPOSITE UNTIL 2026-08-19, and the assumption behind it was wrong.
+        # Materialising needs an ordering edge -- after the storage holding containersPath, before
+        # whatever starts the container -- and under an external runtime this module knows neither.
+        # Its guess produced a dangling wants-link on a unit that did not exist, an install ordered
+        # only after local-fs.target (1.6s) onto a pool that mounted at 227s, and a rewrite of the
+        # live file AFTER the container had started from it. Render, and stop.
+        (check "external-runtime/does-NOT-materialise-because-it-cannot-order-that-correctly"
+          (!(cfg-external-runtime.systemd.services ? "nixlxc-container-example-container-apply"))
+          "under an external runtime the owner materialises; this module cannot know what to order against")
+
+        (check "external-runtime/but-the-rendered-config-is-still-published-for-the-owner-to-read"
+          (cfg-external-runtime.environment.etc ? "nixlxc/containers/example-container.config")
+          "render-only still has to PUBLISH, or the owner has nothing to install from")
+
+        # And when the runtime IS ours, the oneshot must still exist -- otherwise this change would
+        # have quietly removed materialisation for every ordinary consumer.
+        (check "external-runtime/the-oneshot-still-exists-when-this-module-owns-the-runtime"
+          (cfg-one-container.systemd.services ? "nixlxc-container-example-container-apply")
+          "the ordinary path must be untouched by the external-runtime carve-out")
 
         # The original refusal still stands for the case it was written for.
         (check "external-runtime/a-container-with-no-host-at-all-is-still-refused"

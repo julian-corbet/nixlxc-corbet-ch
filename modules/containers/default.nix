@@ -698,7 +698,29 @@ in
       })
       cfg;
 
-    systemd.services = lib.mapAttrs'
+    # MATERIALISATION IS OURS ONLY WHEN THE RUNTIME IS OURS.
+    #
+    # This oneshot orders itself `before = [ "lxc.service" ]` -- the upstream autostart unit this
+    # repository's own host module enables. That is correct when we own the runtime and meaningless
+    # when we do not: a foreign owner starts its containers from a unit of its own that this module
+    # cannot name, so every ordering edge here is a guess, and the guesses were all wrong on the
+    # first host to try it. Measured there:
+    #
+    #   * `lxc.service` did not exist at all, leaving a dangling
+    #     /etc/systemd/system/lxc.service.wants/ symlink and no ordering against anything real;
+    #   * the unit's only real edge was `After=local-fs.target`, reached at 1.6s, while the pool
+    #     holding `containersPath` imported at 227s -- so `install -D` would create the config on
+    #     the ROOT dataset and the later mount would occlude it, leaving invisible junk;
+    #   * it rewrote the live file AFTER the container had already started from it, so the file on
+    #     disk no longer described the running container and nothing could tell.
+    #
+    # None of that is fixable from in here, because the missing fact -- which unit starts these
+    # containers, and what it must be ordered after -- belongs to the owner. So under
+    # `runtimeManagedElsewhere` this module renders to `environment.etc` and stops. Materialising
+    # from there is the owner's job, and the owner is the only party that can order it correctly
+    # (infra's own consumer does it as an ExecStartPre in the very unit that starts the container,
+    # which is the one ordering that cannot race).
+    systemd.services = lib.optionalAttrs (!config.nixlxc.host.runtimeManagedElsewhere) (lib.mapAttrs'
       (name: _: {
         name = "nixlxc-container-${name}-apply";
         value = {
@@ -721,6 +743,6 @@ in
           '';
         };
       })
-      cfg;
+      cfg);
   };
 }

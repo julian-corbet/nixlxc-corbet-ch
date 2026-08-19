@@ -73,6 +73,20 @@ let
   # ── Fixtures ─────────────────────────────────────────────────────────────────────
   cfg-host-only = evalNixos [ baseHost ];
 
+  # A host whose liblxc runtime belongs to somebody else -- a bespoke module, a foreign-distro
+  # plane, an inherited setup. nixlxc renders and materialises the container; it installs nothing.
+  externalRuntimeHost = {
+    nixlxc.host = {
+      runtimeManagedElsewhere = true;
+      containersPath = "/var/lib/nixlxc/containers";
+    };
+  };
+
+  cfg-external-runtime = evalNixos [
+    externalRuntimeHost
+    { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }
+  ];
+
   cfg-one-container = evalNixos [
     baseHost
     {
@@ -181,6 +195,52 @@ in
         (check "host-only/toplevel-evaluates"
           (builtins.tryEval (builtins.seq (builtins.unsafeDiscardStringContext cfg-host-only.system.build.toplevel.drvPath) true)).success
           "expected a host with nixlxc.host.enable + containersPath set to evaluate cleanly")
+
+        # ── A runtime this module does NOT own ─────────────────────────────────────────
+        # The interesting half is what it does NOT install: a host that already runs liblxc
+        # under another owner must get rendering and materialisation and nothing else, or the
+        # two owners fight over virtualisation.lxc and the winner is decided by merge order.
+        (check "external-runtime/container-renders-without-this-module-owning-the-host"
+          (lib.hasInfix "lxc.rootfs.path = dir:/var/lib/nixlxc/roots/example"
+            (configText cfg-external-runtime "example-container"))
+          "the container must still be rendered when the runtime belongs to somebody else")
+
+        (check "external-runtime/installs-no-liblxc-runtime-of-its-own"
+          (!cfg-external-runtime.virtualisation.lxc.enable
+            && !(cfg-external-runtime.systemd.services ? lxc))
+          ("declaring the runtime external must install NOTHING: got lxc.enable="
+            + builtins.toJSON cfg-external-runtime.virtualisation.lxc.enable))
+
+        (check "external-runtime/still-materialises-the-config-at-the-lxcpath"
+          (cfg-external-runtime.systemd.services ? "nixlxc-container-example-container-apply")
+          "rendering without materialising would leave the other owner reading a stale file")
+
+        # The original refusal still stands for the case it was written for.
+        (check "external-runtime/a-container-with-no-host-at-all-is-still-refused"
+          (buildFails [
+            { nixlxc.host.containersPath = "/var/lib/nixlxc/containers"; }
+            { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }
+          ])
+          "neither enable nor runtimeManagedElsewhere: the rendered config could never be started")
+
+        (check "external-runtime/claiming-both-owners-is-refused"
+          (buildFails [
+            {
+              nixlxc.host = {
+                enable = true;
+                runtimeManagedElsewhere = true;
+                containersPath = "/var/lib/nixlxc/containers";
+              };
+            }
+          ])
+          "they are alternatives; both set means which runtime is authoritative is decided by merge order")
+
+        (check "external-runtime/containersPath-is-still-required"
+          (buildFails [
+            { nixlxc.host.runtimeManagedElsewhere = true; }
+            { nixlxc.containers.example-container.rootfs.path = "/var/lib/nixlxc/roots/example"; }
+          ])
+          "the renderer has to know where the other owner keeps its containers")
 
         (check "host-only/lxc-enabled"
           cfg-host-only.virtualisation.lxc.enable

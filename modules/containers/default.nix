@@ -663,11 +663,24 @@ in
   config = lib.mkIf (cfg != { }) {
     assertions = [
       {
-        assertion = config.nixlxc.host.enable;
+        # `runtimeManagedElsewhere` is the second way to satisfy this, and it is a DECLARATION
+        # rather than a bypass: it says liblxc is running and somebody else owns it. The refusal
+        # below still stands for the case it was written for -- a container declared with no host
+        # at all, whose rendered config nothing can ever start.
+        assertion = config.nixlxc.host.enable || config.nixlxc.host.runtimeManagedElsewhere;
         message = ''
-          nixlxc.containers defines at least one container, but nixlxc.host.enable is false. A
-          container needs a host to run on -- import modules/lxc-host alongside
+          nixlxc.containers defines at least one container, but nothing says a host exists to run
+          it on -- a rendered .config nothing can start is a declaration with no effect.
+
+          Either let this repository manage the runtime: import modules/lxc-host alongside
           modules/containers and set nixlxc.host.enable = true.
+
+          Or, if liblxc is already running here under some other owner (a bespoke module, a
+          foreign-distro plane, an inherited setup being migrated), say so:
+          nixlxc.host.runtimeManagedElsewhere = true. That installs nothing at all and leaves the
+          container rendering and materialisation to this module while the runtime stays where it
+          is. `nixlxc.host.containersPath` is still required either way, because the renderer has
+          to know where containers are kept.
         '';
       }
     ] ++ requiredFieldAssertions ++ deliverAssertions ++ idmapAssertions ++ kindAssertions;

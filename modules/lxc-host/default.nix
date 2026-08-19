@@ -59,6 +59,33 @@ in
   options.nixlxc.host = {
     enable = lib.mkEnableOption "a declarative LXC container host";
 
+    runtimeManagedElsewhere = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        The host already runs liblxc, and something other than this module owns it.
+
+        WHY THIS EXISTS RATHER THAN "just enable the host too". `modules/containers` refuses to
+        declare a container with no host, which is the right default: a rendered `.config` that
+        nothing can start is a declaration with no effect, and that refusal is worth keeping.
+        But it assumed the only possible host was THIS module's, and that is a different claim.
+        A host may already have liblxc installed and its `lxcpath` set by a module of its own --
+        an existing bespoke one, a foreign-distro plane, an inherited setup being migrated
+        incrementally -- and on such a host the choice was to either duplicate the runtime (two
+        modules setting `virtualisation.lxc`, both believing they own the unit) or abandon typed
+        container rendering entirely. Neither is a good answer to "I want this container declared".
+
+        Set true and this module installs NOTHING: no liblxc, no `lxcpath`, no service. It
+        contributes only the option surface, so `modules/containers` can render and materialise a
+        container against a runtime it does not manage. `containersPath` is still required, because
+        the renderer has to know where the other owner keeps its containers.
+
+        This is a statement about who owns the runtime, never about whether one exists -- nothing
+        here can verify that liblxc is actually installed, and a wrong answer surfaces as a
+        container that will not start rather than as a silent misconfiguration.
+      '';
+    };
+
     containersPath = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -77,27 +104,50 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = cfg.containersPath != null;
-        message = ''
-          nixlxc.host.containersPath must be set -- there is no default (see the option doc).
-          Set it to the directory this host's own storage provisioning already brings up;
-          nixlxc never creates one.
-        '';
-      }
-    ];
+  config = lib.mkMerge [
+    # `containersPath` is required whenever this module's option surface is being USED for real --
+    # whether the runtime is ours or somebody else's. Split out of the block below because that one
+    # only runs when we install the runtime, and the renderer needs this path in both cases: it is
+    # where the container's `.config` gets materialised, which is a fact about the host regardless
+    # of who starts liblxc.
+    (lib.mkIf (cfg.enable || cfg.runtimeManagedElsewhere) {
+      assertions = [
+        {
+          assertion = cfg.containersPath != null;
+          message = ''
+            nixlxc.host.containersPath must be set -- there is no default (see the option doc).
+            Set it to the directory this host's own storage provisioning already brings up;
+            nixlxc never creates one.
+          '';
+        }
+        {
+          # The two are alternatives, not a spectrum. Both set at once means one of them is a
+          # leftover, and which runtime is authoritative would be decided by merge order rather
+          # than by anybody's intent.
+          assertion = !(cfg.enable && cfg.runtimeManagedElsewhere);
+          message = ''
+            nixlxc.host.enable and nixlxc.host.runtimeManagedElsewhere are both set. They are
+            alternatives: the first installs liblxc and its lxcpath here, the second declares that
+            something else already does. Setting both means two owners of one runtime -- pick the
+            one that is true.
+          '';
+        }
+      ];
+    })
 
-    virtualisation.lxc.enable = lib.mkDefault true;
-    virtualisation.lxc.systemConfig = lib.mkDefault "lxc.lxcpath = ${effectiveContainersPath}\n";
+    # The RUNTIME half: installed only when this module owns it. Everything here is exactly
+    # what `runtimeManagedElsewhere` says somebody else already provides.
+    (lib.mkIf cfg.enable {
+      virtualisation.lxc.enable = lib.mkDefault true;
+      virtualisation.lxc.systemConfig = lib.mkDefault "lxc.lxcpath = ${effectiveContainersPath}\n";
 
-    # See this file's own header ("WHY lxc.service, NOT A BESPOKE nixlxc AUTOSTART UNIT") for
-    # exactly why this mirrors nixpkgs's own lxc.nix module's treatment of lxc-net.service.
-    systemd.packages = [ config.virtualisation.lxc.package ];
-    systemd.services.lxc = {
-      enable = true;
-      wantedBy = [ "multi-user.target" ];
-    };
-  };
+      # See this file's own header ("WHY lxc.service, NOT A BESPOKE nixlxc AUTOSTART UNIT")
+      # for exactly why this mirrors nixpkgs's own lxc.nix treatment of lxc-net.service.
+      systemd.packages = [ config.virtualisation.lxc.package ];
+      systemd.services.lxc = {
+        enable = true;
+        wantedBy = [ "multi-user.target" ];
+      };
+    })
+  ];
 }
